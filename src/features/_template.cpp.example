@@ -1,0 +1,95 @@
+// =====================================================================
+//  ШАБЛОН ФУНКЦИИ MEGAWARE — скопируй в src/features/my_feature.cpp,
+//  заполни и собери. Больше НИКАКИХ правок по проекту не нужно:
+//  пункт появится в GUI сам.
+//
+//  Как это работает: REGISTER_FEATURE при старте кладёт описание в
+//  реестр (src/ui/features.h), Ui строит из него пункты категорий.
+//  Детали и список категорий/иконок — docs/ADDING_FEATURES.md.
+//
+//  ВАЖНО про производительность (у устройства общая SPI-шина дисплей/
+//  SD/CC1101 и экономный кадр ~1 раз в секунду в простое):
+//    - onTick() вызывается на КАЖДОЙ итерации loop() — держи его
+//      лёгким, тяжёлую работу делай по millis()-таймеру внутри;
+//    - кадр рисуется только при вводе, раз в секунду или после
+//      Features::requestRedraw() — анимация = requestRedraw() из
+//      onTick, когда есть что показать;
+//    - избегай динамических аллокаций и тяжёлого STL.
+// =====================================================================
+
+// --- include-пути (файл лежит в src/features/) ---
+#include "../ui/features.h"          // реестр, MwIcon, MwDraw, InputState
+// #include "../hal/battery.h"       // периферия: Battery, Board, Config,
+// #include "../radio/subghz.h"      //   SubGhz, WifiMgr, Files, MemoryController, WebUI
+// #include "../../include/theme.h"  // палитра Theme::*
+
+namespace {
+
+    // --- состояние фичи: обычные static-переменные здесь же ---
+
+    // Вход в функцию (клик по пункту). Нужен только для фич с
+    // состоянием "открыта/закрыта"; если onEnter == nullptr, фича
+    // считается stateless и рисуется в GUI ещё ДО входа (превью на
+    // уровне подвкладок — как ведут себя SubGhz/Bluetooth).
+    void onEnter() {
+        // например: сбросить состояние, включить приёмник и т.п.
+    }
+
+    // Обработка ввода. Вызывается только при реальном событии.
+    // Верни true, если событие съедено; false — событие не твоё.
+    // НЕ съеденный UserKey (Quit) выводит из фичи на уровень подвкладок
+    // и вызовет onExit() — это стандартный выход, свой не пиши.
+    // in.event: None / Click / LongPress / UserKey; in.rotationSteps — шаги энкодера.
+    bool onInput(const InputState& in) {
+        if (in.rotationSteps != 0) {
+            // ... листание ...
+            Features::requestRedraw();
+            return true;
+        }
+        if (in.event == InputEvent::Click) {
+            // ... действие ...
+            Features::requestRedraw();
+            return true;
+        }
+        return false;
+    }
+
+    // Цикл/обновление — каждый тик loop(), даже без ввода и без кадра.
+    // Держи лёгким; пример таймера:
+    //   static uint32_t last = 0;
+    //   if (millis() - last < 250) return;
+    //   last = millis();
+    //   if (что-то изменилось) Features::requestRedraw();
+    void onTick() {
+    }
+
+    // Отрисовка контента. Рамку/заголовок даёт MwDraw::card, область —
+    // (x, y, w, h). Оболочку GUI (топбар/сайдбар/вкладки) рисует сам Ui —
+    // их трогать не надо и не надо делать fillSprite.
+    void onDraw(LGFX_Sprite& c, int x, int y, int w, int h) {
+        MwDraw::card(c, x, y, w, h, "MY FEATURE"); // карточка в стиле GUI
+        c.setFont(&fonts::Font0);
+        c.setTextDatum(textdatum_t::top_left);
+        c.setTextColor(Theme::TEXT_DIM, Theme::BG_PANEL);
+        c.drawString("rotate / click / quit", x + 10, y + 26);
+    }
+
+    // Выход из фичи (Quit или покидание пункта). Верни железо в исходное.
+    void onExit() {
+    }
+
+} // namespace
+
+// ---------------------------------------------------------------------
+//  РЕГИСТРАЦИЯ — единственная обязательная строка.
+//  REGISTER_FEATURE(название, категория, иконка, порядок,
+//                   onEnter, onInput, onTick, onDraw, onExit);
+//  Неиспользуемые обработчики — nullptr (минимум нужен onDraw).
+//
+//  Категория — имя встроенной (MwCat::SubGhz, MwCat::Wifi, ...) или
+//  своё ("Tools" и т.п.) — тогда в сайдбаре появится новая категория
+//  с иконкой icon_ (см. namespace MwIcon в src/ui/features.h).
+//  Порядок: меньше — раньше в категории; равные — по порядку файлов.
+// ---------------------------------------------------------------------
+REGISTER_FEATURE("My Feature", "Tools", MwIcon::Chip, 100,
+                 onEnter, onInput, onTick, onDraw, onExit);
