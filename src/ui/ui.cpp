@@ -3,6 +3,7 @@
 #include "../../include/pins.h"
 #include "../net/webui.h"
 #include "../hal/config.h"
+#include "../hal/nfc.h"
 #include "../radio/subghz.h"
 #include <esp_system.h>
 #include <time.h>
@@ -14,8 +15,10 @@
 #include "../hal/ir.h"
 #include "../net/portal.h"
 #include <HTTPClient.h>
+#include <Update.h>
+#include <esp_ota_ops.h>
 
-// MP3: однозаголовочный декодер (public domain), реализация — один раз.
+// MP3: single-header decoder (public domain), implementation included once.
 #define MINIMP3_ONLY_MP3
 #define MINIMP3_IMPLEMENTATION
 #pragma GCC diagnostic push
@@ -32,18 +35,20 @@ namespace {
         const char* lettersRows[3][10] = {
             {"q","w","e","r","t","y","u","i","o","p"},
             {"a","s","d","f","g","h","j","k","l",""},
-            {"^","z","x","c","v","b","n","m","DEL",""},
+            {"^","z","x","c","v","b","n","m","",""},
         };
-        const int lettersRowLen[3] = {10, 9, 9};
-        const char* funcRowLetters[4] = {"123", "SPACE", "OK", "ESC"};
+        const int lettersRowLen[3] = {10, 9, 8};
+        // 6 keys — DEL and TXT live here; the drawing loop size must
+        // match the array length, otherwise we read garbage out of bounds
+        const char* funcRowLetters[6] = {"DEL", "TXT", "123", "SPACE", "OK", "ESC"};
 
         const char* symsRows[3][10] = {
             {"1","2","3","4","5","6","7","8","9","0"},
             {"-","_",".","@","!","#","$","%","&","*"},
-            {"(",")","+","=",":",";","?","/","DEL",""},
+            {"(",")","+","=",":",";","?","/","",""},
         };
-        const int symsRowLen[3] = {10, 10, 9};
-        const char* funcRowSyms[4] = {"ABC", "SPACE", "OK", "ESC"};
+        const int symsRowLen[3] = {10, 10, 8};
+        const char* funcRowSyms[6] = {"DEL", "TXT", "ABC", "SPACE", "OK", "ESC"};
     }
 
     bool i2cProbe(uint8_t addr) {
@@ -51,9 +56,9 @@ namespace {
         return Wire.endTransmission() == 0;
     }
 
-    // Окно прокрутки списка: курсор всегда виден, при смене экрана
-    // (id) окно сбрасывается наверх. Один статический слот: экраны
-    // рисуются по одному за кадр.
+    // List scroll window: the cursor stays visible; on a screen change
+    // (id) the window resets to the top. One static slot: screens
+    // are drawn one per frame.
     int scrollWindow(int id, int selected, int visible, int total) {
         static int lastId = -1;
         static int top = 0;
@@ -65,9 +70,9 @@ namespace {
         return top;
     }
 
-    // Транслитерация сразу в буфер: горячие пути отрисовки (список сетей
-    // рисуется на каждом кадре) не должны аллоцировать String — это
-    // фрагментирует внутренний heap и приближает «RAM overflow».
+    // Transliteration straight into a buffer: hot drawing paths (the network
+    // list is drawn on every frame) must not allocate String — it
+    // fragments the internal heap and hastens "RAM overflow".
     void translitToBuf(const String& in, char* out, size_t n) {
         static const char* const table[64] = {
             "A","B","V","G","D","E","ZH","Z","I","Y","K","L","M","N","O","P",
@@ -89,7 +94,7 @@ namespace {
                 else if (cp >= 0x0410 && cp <= 0x044F) {
                     const char* t = table[cp - 0x0410];
                     while (*t && o + 1 < n) out[o++] = *t++;
-                    if (o + 1 >= n) break; // строка кончилась — не теряем позицию i
+                    if (o + 1 >= n) break; // buffer ran out — do not lose position i
                 }
                 else out[o++] = '?';
                 continue;
@@ -107,7 +112,7 @@ namespace {
         return String(buf);
     }
 
-    // Строка списка/настроек: «> label ..... value» (значение справа).
+    // List/settings row: "> label ..... value" (value on the right).
     void drawListRow(LGFX_Sprite& c, int x, int y, int w, bool selected, bool editing,
                      const char* label, const char* value, uint16_t valueCol) {
         c.setFont(&fonts::Font0);
@@ -127,13 +132,13 @@ namespace {
         }
     }
 
-    // ---- Плеер (MP3 через minimp3, WAV — свой парсер заголовка) ----
-    constexpr int MP3_BUF = 2048;   // >= макс. размер кадра (~1044 Б)
+    // ---- Player (MP3 via minimp3, WAV — own header parser) ----
+    constexpr int MP3_BUF = 2048;   // >= max frame size (~1044 B)
     mp3dec_t mp3dec;
     uint8_t mp3buf[MP3_BUF];
     int mp3Fill = 0;
     bool playIsMp3 = false;
-    bool playActive = false;        // зеркало Ui::playing для этого namespace
+    bool playActive = false;        // mirror of Ui::playing for this namespace
     File playFile;
     char playTitle[40] = "";
     uint32_t playPos = 0, playTotal = 0;
@@ -147,11 +152,11 @@ namespace {
         if (n > 0) { mp3Fill += n; playPos += n; }
     }
 
-    void netCheckTick(); // реализация во втором ns (около drawAboutScreen)
+    void netCheckTick(); // implemented in the second ns (near drawAboutScreen)
 } // namespace
 
 // =====================================================================
-//  Плеер: Mp3/WAV из Files (hold на файле). Кормление I2S на тике.
+//  Player: Mp3/WAV from Files (hold on a file). Feeds I2S on each tick.
 // =====================================================================
 void Ui::startPlayback(const String& path) {
     stopPlayback();
@@ -163,13 +168,13 @@ void Ui::startPlayback(const String& path) {
     if (isMp3) {
         mp3dec_init(&mp3dec);
         mp3Fill = 0;
-        playChannels = 2; // уточнится по кадрам
+        playChannels = 2; // refined from the frames
         AudioOut::begin(44100);
         playTotal = f.size();
         playPos = 0;
         playIsMp3 = true;
     } else {
-        // WAV: RIFF/WAVE, ищем fmt + data (16 бит PCM)
+        // WAV: RIFF/WAVE, look for fmt + data (16-bit PCM)
         uint8_t hdr[12];
         if (f.read(hdr, 12) != 12 || memcmp(hdr, "RIFF", 4) || memcmp(hdr + 8, "WAVE", 4)) { f.close(); return; }
         uint16_t ch = 1, bits = 16;
@@ -225,7 +230,7 @@ void Ui::tickPlayback() {
     playActive = true;
 
     if (playIsMp3) {
-        // 3-4 кадра за тик (~60-90 мс аудио) — DMA не голодает
+        // 3-4 frames per tick (~60-90 ms of audio) — the DMA does not starve
         for (int frame = 0; frame < 4 && playing; frame++) {
             refillMp3();
             if (mp3Fill == 0 && !playFile.available()) { stopPlayback(); return; }
@@ -233,14 +238,14 @@ void Ui::tickPlayback() {
             static mp3d_sample_t pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
             int samples = mp3dec_decode_frame(&mp3dec, mp3buf, mp3Fill, pcm, &info);
             if (info.frame_bytes == 0) {
-                // кадр не влез/не распознан
+                // frame did not fit / was not recognized
                 if (mp3Fill == MP3_BUF) {
                     memmove(mp3buf, mp3buf + MP3_BUF / 2, MP3_BUF / 2);
                     mp3Fill = MP3_BUF / 2;
                 }
                 refillMp3();
                 if (mp3Fill == 0 && !playFile.available()) { stopPlayback(); return; }
-                return; // досыпем в следующем тике
+                return; // top up with data on the next tick
             }
             if (samples > 0 && info.channels > 0) {
                 if (info.hz > 0) AudioOut::begin(info.hz);
@@ -259,7 +264,7 @@ void Ui::tickPlayback() {
         return;
     }
 
-    // WAV: читаем кусок, моно дублируем в стерео
+    // WAV: read a chunk, duplicate mono into stereo
     static int16_t wavBuf[1024];
     int n = playFile.read((uint8_t*)wavBuf, sizeof(wavBuf));
     if (n <= 0) { stopPlayback(); return; }
@@ -276,16 +281,16 @@ void Ui::tickPlayback() {
 }
 
 // =====================================================================
-//  Навигация: категории / пункты (логика не зависит от вида)
+//  Navigation: categories / items (logic does not depend on the visuals)
 // =====================================================================
 int Ui::sectionTotal() const { return Features::categoryCount(); }
 
-// Список показывает только категории с пунктами; позиция -> категория.
+// The list shows only categories with items; position -> category.
 void Ui::rebuildVisibleCats() {
     visibleCatCount = 0;
     for (int c = 0; c < sectionTotal(); c++)
         if (itemCount(c) > 0) visibleCat[visibleCatCount++] = c;
-    // порядок сайдбара — явный (см. Features::categoryOrder / MwOrder)
+    // sidebar order is explicit (see Features::categoryOrder / MwOrder)
     for (int i = 1; i < visibleCatCount; i++) {
         int v = visibleCat[i];
         int j = i - 1;
@@ -295,7 +300,7 @@ void Ui::rebuildVisibleCats() {
         }
         visibleCat[j + 1] = v;
     }
-    if (visibleCatCount == 0) visibleCat[visibleCatCount++] = 0; // страховка от пустого меню
+    if (visibleCatCount == 0) visibleCat[visibleCatCount++] = 0; // guard against an empty menu
     if (sidebarIndex >= visibleCatCount) sidebarIndex = 0;
 }
 
@@ -306,10 +311,10 @@ int Ui::catOf(int pos) const {
 
 int Ui::builtinTabCount(Section s) const {
     switch (s) {
-        case Section::Wifi:      return 1;  // только Connect; WebUI — во Files
+        case Section::Wifi:      return 1;  // only Connect; WebUI is under Files
         case Section::Files:     return 3;  // SD / Flash / WebUI
         case Section::Settings:  return 5;
-        default:                 return 0; // SubGhz — целиком фичи реестра
+        default:                 return 0; // SubGhz — entirely registry features
     }
 }
 
@@ -347,13 +352,13 @@ bool Ui::sectionFieldEditable(Section s) const {
 }
 
 // =====================================================================
-//  Инициализация
+//  Initialization
 // =====================================================================
 void Ui::begin() {
-    Features::init(); // раскладка фич по категориям (после всех статических конструкторов)
-    rebuildVisibleCats(); // категории без пунктов (выключенный Bluetooth и т.п.) скрыть
+    Features::init(); // lay features out by category (after all static constructors)
+    rebuildVisibleCats(); // hide categories without items (Bluetooth disabled etc.)
 
-    // Настройки дисплея переживают перезагрузку (NVS)
+    // Display settings survive reboot (NVS)
     displayBrightness = (uint8_t)constrain(Config::getInt("disp_bright", 180), 10, 255);
     displayAutoDimSec = Config::getInt("disp_dim", 60);
     {
@@ -362,13 +367,30 @@ void Ui::begin() {
         for (int i = 0; i < 6; i++) if (presets[i] == displayAutoDimSec) ok = true;
         if (!ok) displayAutoDimSec = 60;
     }
-    // Кастомизация темы: акцент + подсказки подвала
+    // Theme customization: accent + footer hints
     themeAccentIdx = (uint8_t)constrain(Config::getInt("theme_accent", 0), 0, (int)Theme::ACCENT_PRESETS - 1);
     Theme::setAccent(themeAccentIdx);
     footerHints = Config::getBool("footer_hints", true);
+    // Screen orientation and time zone also survive reboot
+    displayFlipped = Config::getBool("disp_flip", false);
+    utcOffsetHours = constrain(Config::getInt("utc_off", 0), -12, 14);
+    // LED customization (encoder): everything saveLedSettings() persists
+    ledBrightness = (uint8_t)constrain(Config::getInt("led_bright", 90), 0, 255);
+    ledR = (uint8_t)constrain(Config::getInt("led_r", 214), 0, 255);
+    ledG = (uint8_t)constrain(Config::getInt("led_g", 24), 0, 255);
+    ledB = (uint8_t)constrain(Config::getInt("led_b", 34), 0, 255);
+    ledModeIdx = constrain(Config::getInt("led_mode", 2), 0, 4);
+    ledSpeedPct = (uint8_t)constrain(Config::getInt("led_speed", 100), 10, 300);
+    Board::setLedBrightness(ledBrightness);
+    Board::setLedColor(ledR, ledG, ledB);
+    Board::setLedMode((LedMode)ledModeIdx);
+    Board::setLedSpeed(ledSpeedPct);
+    Board::setLedClickBlip(Config::getBool("led_click", true));
+    Board::setLedRotGlow(Config::getBool("led_rot", true));
 
     display.begin();
     display.setRotation(3);
+    if (displayFlipped) applyDisplayRotation();
     display.setBrightness(displayBrightness);
     display.fillScreen(Theme::BG);
 
@@ -386,6 +408,81 @@ void Ui::applyDisplayRotation() {
     display.setRotation(displayFlipped ? 1 : 3);
 }
 
+// ---- entry points from WebUI (Ui fields are private — change via methods) ----
+void Ui::webSetBrightness(uint8_t v) {
+    displayBrightness = (uint8_t)constrain((int)v, 10, 255);
+    display.setBrightness(displayBrightness);
+    Config::setInt("disp_bright", displayBrightness);
+}
+
+bool Ui::webSetAccentPreset(int idx) {
+    if (idx < 0 || idx >= Theme::ACCENT_PRESETS) return false;
+    themeAccentIdx = (uint8_t)idx;
+    Theme::setAccent(themeAccentIdx);
+    Config::setInt("theme_accent", themeAccentIdx);
+    return true;
+}
+
+void Ui::saveLedSettings() {
+    Config::setInt("led_bright", ledBrightness);
+    Config::setInt("led_r", ledR);
+    Config::setInt("led_g", ledG);
+    Config::setInt("led_b", ledB);
+    Config::setInt("led_mode", ledModeIdx);
+    Config::setInt("led_speed", ledSpeedPct);
+    Config::setBool("led_click", Board::getLedClickBlip());
+    Config::setBool("led_rot", Board::getLedRotGlow());
+}
+
+// ---- flash a .bin straight from storage (hold on a file in Files) ----
+// Picks the next OTA partition, writes block by block, reboots on success.
+// The warning screen is drawn BEFORE flashing starts: the process is blocking.
+bool Ui::flashFirmwareFile(FsRoot root, const String& path) {
+    fs::FS& fsRef = root == FsRoot::SD ? (fs::FS&)SD : (fs::FS&)LittleFS;
+    File f = fsRef.open(path);
+    if (!f || f.isDirectory()) { f.close(); return false; }
+    size_t sz = f.size();
+    const esp_partition_t* next = esp_ota_get_next_update_partition(esp_ota_get_running_partition());
+    const char* err = nullptr;
+    if (!next) err = "no OTA partition - flash via cable once";
+    else if (sz == 0 || sz > next->size) err = "file too big for OTA slot";
+
+    canvas.fillSprite(Theme::BG);
+    canvas.setTextColor(Theme::ACCENT, Theme::BG);
+    canvas.drawString("FLASHING - DO NOT POWER OFF", 10, 20);
+    canvas.setTextColor(Theme::TEXT_DIM, Theme::BG);
+    canvas.drawString(path, 10, 40);
+    if (err) {
+        canvas.setTextColor(Theme::ERR, Theme::BG);
+        canvas.drawString(err, 10, 70);
+        canvas.pushSprite(0, Y_OFFSET);
+        f.close();
+        delay(4000);
+        return false;
+    }
+    canvas.pushSprite(0, Y_OFFSET);
+
+    if (!Update.begin(next->size)) { err = Update.errorString(); }
+    else {
+        static uint8_t buf[4096];
+        while (f.available()) {
+            int n = f.read(buf, sizeof(buf));
+            if (n <= 0 || Update.write(buf, (size_t)n) != (size_t)n) { err = Update.errorString(); break; }
+        }
+        if (!err && !Update.end(true)) err = Update.errorString();
+    }
+    f.close();
+    if (!err) { delay(300); ESP.restart(); }
+
+    canvas.fillRect(0, 60, Theme::SCREEN_W, 24, Theme::BG);
+    canvas.setTextColor(Theme::ERR, Theme::BG);
+    canvas.drawString("FLASH FAILED:", 10, 64);
+    canvas.drawString(err ? err : "?", 10, 78);
+    canvas.pushSprite(0, Y_OFFSET);
+    delay(4000);
+    return false;
+}
+
 void Ui::noteActivity(const InputState& in) {
     if (in.rotationSteps != 0 || in.event != InputEvent::None) {
         lastActivityMs = millis();
@@ -398,7 +495,7 @@ void Ui::noteActivity(const InputState& in) {
 }
 
 // =====================================================================
-//  Главный тик
+//  Main tick
 // =====================================================================
 void Ui::tick(const InputState& in) {
     if (!apPresetLoaded) {
@@ -416,30 +513,48 @@ void Ui::tick(const InputState& in) {
 
     noteActivity(in);
 
-    // прогрессирующее затухание: 25s→10, +12s→20, +6s→30, +3s→40, потом 0
-    // (значения 0-255; любой ввод возвращает яркость пользователя)
+    // auto-dim: after displayAutoDimSec seconds of idle — then a staircase
+    // of brightness down to zero (configured in Customize > Display > Auto-dim;
+    // any input restores the user brightness)
     {
-        static int dimStage = -1; // -1 = не затушен
-        uint32_t idleMs = millis() - lastActivityMs;
-        int newStage;
-        if      (idleMs > 46000) newStage = 4; // off
-        else if (idleMs > 43000) newStage = 3; // 40
-        else if (idleMs > 37000) newStage = 2; // 30
-        else if (idleMs > 25000) newStage = 1; // 10 -> 20
-        else                     newStage = -1;
+        static int dimStage = -1; // -1 = not dimmed
+        int newStage = -1;
+        if (displayAutoDimSec > 0) {
+            uint32_t idleMs = millis() - lastActivityMs;
+            uint32_t base = (uint32_t)displayAutoDimSec * 1000UL;
+            if      (idleMs > base + 21000) newStage = 4; // off
+            else if (idleMs > base + 15000) newStage = 3;
+            else if (idleMs > base + 9000)  newStage = 2;
+            else if (idleMs > base + 3000)  newStage = 1;
+            else if (idleMs > base)         newStage = 0;
+        }
         if (newStage != dimStage) {
             dimStage = newStage;
             displayDimmedNow = (dimStage >= 0);
-            static const uint8_t LEVELS[] = {10, 20, 30, 40, 0};
-            display.setBrightness(dimStage < 0 ? displayBrightness : LEVELS[dimStage]);
+            static const uint8_t PCT[] = {55, 35, 20, 10, 0}; // % of the user brightness
+            display.setBrightness(dimStage < 0 ? displayBrightness
+                                               : (uint8_t)((uint16_t)displayBrightness * PCT[dimStage] / 100));
         }
     }
 
-    // плеер: кормим I2S на каждом тике ДО любых ранних выходов
+    // Encoder LED feedback (on/off in Customize > LED)
+    if (in.event == InputEvent::Click) Board::ledBlip();
+    if (in.rotationSteps != 0) Board::ledRot();
+
+    // web-sweep toggled from the browser — redraw the header so the
+    // RF SWEEP indicator appears/disappears on the device
+    static bool lastWebSweep = false;
+    if (SubGhz::webSpectrumActive() != lastWebSweep) {
+        lastWebSweep = SubGhz::webSpectrumActive();
+        frameMoving = true;
+        lastFrameAnimated = true;
+    }
+
+    // player: feed I2S on every tick BEFORE any early exits
     if (playing) tickPlayback();
 
-    // Wi-Fi RAM освобождается автоматически раз в минуту (сама функция
-    // не трогает подключённую сеть/AP/скан)
+    // Wi-Fi RAM is released automatically once a minute (the function
+    // itself does not touch the connected network/AP/scan)
     static uint32_t lastRamSweep = 0;
     if (millis() - lastRamSweep > 60000) {
         lastRamSweep = millis();
@@ -448,26 +563,26 @@ void Ui::tick(const InputState& in) {
             WifiMgr::releaseIdleResources();
         }
     }
-    // проверка интернета по запросу About (выполняется здесь, не в отрисовке)
+    // internet check requested by About (runs here, not in the drawing code)
     if (netPending) netCheckTick();
 
-    // captive portal: обслуживает клиентов, пока включён (работает в фоне)
+    // captive portal: serves clients while enabled (works in the background)
     Portal::loop();
 
-    // веб-спектроанализатор: развёртка по запросу из WebUI
+    // web spectrum analyzer: sweep on request from WebUI
     if (SubGhz::webSpectrumActive()) SubGhz::sweepOnce();
 
     if (in.powerHeldMs > 250) {
         drawScreen();
         drawPowerCountdown(in.powerHeldMs);
         canvas.pushSprite(0, Y_OFFSET);
-        // После отпускания кадр с оверлеем "DEEP SLEEP IN n/3" нужно
-        // перерисовать — удержание дольше CLICK_MAX_MS не создаёт event.
+        // After release, the frame with the "DEEP SLEEP IN n/3" overlay must
+        // be redrawn — holding longer than CLICK_MAX_MS creates no event.
         lastFrameAnimated = true;
         return;
     }
 
-    // --- фоновые задачи: на каждом тике независимо от перерисовки ---
+    // --- background tasks: every tick, regardless of redrawing ---
     if (WifiMgr::isConnected()) {
         if (!timeConfigured) {
             configTime(utcOffsetHours * 3600, 0, "pool.ntp.org");
@@ -476,11 +591,11 @@ void Ui::tick(const InputState& in) {
     } else {
         timeConfigured = false;
     }
-    // Раньше веб обслуживался только при STA-подключении — в режиме
-    // собственной точки доступа (AP) WebUI замирал.
-    // Предохранитель heap: внутренняя память одна на Wi-Fi-стек, WebUI и
-    // скрипты. При исчерпании первым уходит WebUI — иначе умирает всё
-    // сразу (интерфейс перестаёт отвечать, радио сыпется).
+    // Previously the web was served only with an STA connection — in own
+    // access-point (AP) mode the WebUI froze.
+    // Heap fuse: internal RAM is shared by the Wi-Fi stack, WebUI and
+    // scripts. On exhaustion WebUI goes first — otherwise everything
+    // dies at once (the UI stops responding, the radio falls apart).
     if (WebUI::isRunning() && ESP.getFreeHeap() < 24576) {
         Serial.println("[MEGAWARE] low heap: stopping WebUI (feature/scripts need RAM)");
         WebUI::stop();
@@ -488,20 +603,20 @@ void Ui::tick(const InputState& in) {
     }
     if (WebUI::isRunning()) WebUI::loop();
 
-    // --- решаем, нужен ли кадр ---
+    // --- decide whether a frame is needed ---
     const bool inputActive = (in.rotationSteps != 0 || in.event != InputEvent::None);
     uint32_t now = millis();
-    // Периодика: «живые» экраны (SubGhz/фичи: RSSI/анимации; активная фича) —
-    // раз в секунду. Статичные (меню/настройки/файлы) меняются только от
-    // ввода или смены состояния Wi-Fi — часы/батарея в шапке достаточно
-    // раз в минуту: полный кадр это 106 КБ по общей SPI-шине.
+    // Periodic refresh: "live" screens (SubGhz/features: RSSI/animations;
+    // an active feature) — once a second. Static ones (menu/settings/files)
+    // change only on input or a Wi-Fi state change — clock/battery in the
+    // header is fine once a minute: a full frame is 106 KB over the shared SPI bus.
     int periodicCat = catOf(sidebarIndex);
     const bool screenStatic = focusLevel != FocusLevel::Feature &&
         (periodicCat == (int)Section::Wifi ||
          periodicCat == (int)Section::Files || periodicCat == (int)Section::Settings);
     bool periodic = (now - lastPeriodicDrawMs) >= (screenStatic ? 60000U : 1000U);
     if (periodic) lastPeriodicDrawMs = now;
-    const bool featureRedraw = Features::takeRedrawRequest(); // фичи просят кадр
+    const bool featureRedraw = Features::takeRedrawRequest(); // features request a frame
 
     WifiConnState cs = WifiMgr::connState();
     bool scanning = WifiMgr::isScanning();
@@ -521,11 +636,11 @@ void Ui::tick(const InputState& in) {
     }
 
     if (focusLevel == FocusLevel::Feature && activeFeature) {
-        // ввод → цикл фичи → кадр по необходимости
+        // input -> feature tick -> frame on demand
         handleFeatureInput(in);
         if (focusLevel != FocusLevel::Feature || !activeFeature) {
-            // фича вышла по Quit — рисуем экран, в который вернулись,
-            // иначе ниже разыменуется уже обнулённый activeFeature (креш!)
+            // the feature exited via Quit — draw the screen we returned to,
+            // otherwise activeFeature, already nulled, is dereferenced below (crash!)
             frameMoving = false;
             drawScreen();
             lastFrameAnimated = frameMoving;
@@ -557,7 +672,7 @@ void Ui::tick(const InputState& in) {
 }
 
 // =====================================================================
-//  Каркас кадра: шапка + контент по уровню фокуса + подвал
+//  Frame skeleton: header + content per focus level + footer
 // =====================================================================
 void Ui::drawScreen() {
     drawHeader();
@@ -566,7 +681,7 @@ void Ui::drawScreen() {
     contentRect(x0, y0, w, h);
 
     if (focusLevel == FocusLevel::Feature && activeFeature && activeFeature->onDraw) {
-        canvas.setTextSize(Theme::SIZE_TEXT); // фичи стартуют с базового размера
+        canvas.setTextSize(Theme::SIZE_TEXT); // features start at the base text size
         activeFeature->onDraw(canvas, x0, y0, w, h);
     } else if (focusLevel == FocusLevel::Sidebar) {
         drawMainMenu();
@@ -576,7 +691,7 @@ void Ui::drawScreen() {
         drawFieldScreen();
     }
 
-    // Подсказки в подвале — под контекст
+    // Footer hints — context-dependent
     const char* tv = "select", *pv = "ok", *hv = "back";
     if (footerHints) {
         if (focusLevel == FocusLevel::Field) {
@@ -641,36 +756,40 @@ void Ui::performDashboardAction(int index) {
 }
 
 // =====================================================================
-//  Ввод — меню / пункты / строки (Modal и Feature обрабатываются отдельно)
+//  Input — menu / items / rows (Modal and Feature are handled separately)
 // =====================================================================
 void Ui::handleInput(const InputState& in) {
     if (in.event == InputEvent::None && in.rotationSteps == 0) return;
 
-    int cat = catOf(sidebarIndex); // позиция в списке -> категория реестра
+    int cat = catOf(sidebarIndex); // list position -> registry category
     Section cur = (Section)cat;
     int count = itemCount(cat);
 
     if (focusLevel == FocusLevel::Field) {
-        // Field достижим только во встроенных разделах (фичи получают ввод
-        // сами, см. FocusLevel::Feature) — страховка на случай новой категории.
+        // Field is reachable only in built-in sections (features receive
+        // input themselves, see FocusLevel::Feature) — a guard for a new category.
         if (cat >= (int)Section::COUNT) { focusLevel = FocusLevel::SubTab; return; }
         if (cur == Section::Settings) {
             int tab = subTabIndex[cat];
 
             if (tab == 0) { // Customize
-                if (customizeOpen < 0) { // список LED/Display/Theme
+                if (customizeOpen < 0) { // list of LED/Display/Theme
                     constexpr int ROWS = 3;
                     if (in.rotationSteps != 0) {
                         int idx = fieldIndex[cat];
                         idx = ((idx + in.rotationSteps) % ROWS + ROWS) % ROWS;
                         fieldIndex[cat] = idx;
                     }
-                    if (in.event == InputEvent::Click) customizeOpen = fieldIndex[cat];
+                    if (in.event == InputEvent::Click) {
+                        ledEditingRow = false;   // enter the sublist clean:
+                        displayEditingRow = false; // no stuck edit mode
+                        customizeOpen = fieldIndex[cat];
+                    }
                     if (in.event == InputEvent::UserKey) focusLevel = FocusLevel::SubTab;
                     return;
                 }
-                if (customizeOpen == 0) { // LED — Brightness / R / G / B / Mode / Speed
-                    constexpr int ROWS = 6;
+                if (customizeOpen == 0) { // LED — Brightness / R / G / B / Mode / Speed / Click blip / Rotate glow
+                    constexpr int ROWS = 8;
                     if (!ledEditingRow) {
                         if (in.rotationSteps != 0) {
                             int idx = fieldIndex[cat];
@@ -696,10 +815,16 @@ void Ui::handleInput(const InputState& in) {
                                           Board::setLedMode((LedMode)m); break; }
                                 case 5: ledSpeedPct = (uint8_t)constrain((int)ledSpeedPct + step * 10, 10, 300);
                                         Board::setLedSpeed(ledSpeedPct); break;
+                                case 6: Board::setLedClickBlip(!Board::getLedClickBlip()); break;
+                                case 7: Board::setLedRotGlow(!Board::getLedRotGlow()); break;
                             }
                         }
                         if (in.event == InputEvent::Click) ledEditingRow = false;
-                        if (in.event == InputEvent::UserKey) ledEditingRow = false;
+                        if (in.event == InputEvent::UserKey) {
+                            saveLedSettings(); // all LED settings survive reboot
+                            ledEditingRow = false;
+                            customizeOpen = -1;
+                        }
                     }
                     return;
                 }
@@ -720,6 +845,12 @@ void Ui::handleInput(const InputState& in) {
                             if (row == 0) {
                                 displayBrightness = (uint8_t)constrain((int)displayBrightness + step * 15, 10, 255);
                                 display.setBrightness(displayBrightness);
+                            } else if (row == 1) {
+                                // auto-dim presets: off / 15 / 30 / 60 / 120 / 300 s
+                                static const int presets[] = {0, 15, 30, 60, 120, 300};
+                                int cur = 3;
+                                for (int i = 0; i < 6; i++) if (presets[i] == displayAutoDimSec) cur = i;
+                                displayAutoDimSec = presets[((cur + step) % 6 + 6) % 6];
                             } else {
                                 if (step != 0) { displayFlipped = !displayFlipped; applyDisplayRotation(); }
                             }
@@ -728,11 +859,12 @@ void Ui::handleInput(const InputState& in) {
                             displayEditingRow = false;
                             Config::setInt("disp_bright", displayBrightness);
                             Config::setInt("disp_dim", displayAutoDimSec);
+                            Config::setBool("disp_flip", displayFlipped);
                         }
                     }
                     return;
                 }
-                { // customizeOpen == 2: Theme — клик меняет значение на месте
+                { // customizeOpen == 2: Theme — a click changes the value in place
                     constexpr int ROWS = 2;
                     if (fieldIndex[cat] >= ROWS) fieldIndex[cat] = 0;
                     if (in.rotationSteps != 0) {
@@ -761,14 +893,17 @@ void Ui::handleInput(const InputState& in) {
                     utcOffsetHours = constrain(utcOffsetHours + in.rotationSteps, -12, 14);
                     timeConfigured = false;
                 }
-                if (in.event == InputEvent::Click || in.event == InputEvent::UserKey) focusLevel = FocusLevel::SubTab;
+                if (in.event == InputEvent::Click || in.event == InputEvent::UserKey) {
+                    Config::setInt("utc_off", utcOffsetHours); // time zone survives reboot
+                    focusLevel = FocusLevel::SubTab;
+                }
                 return;
             }
 
-            if (tab == 2) { // About — прокрутка длинного списка
+            if (tab == 2) { // About — scrolling the long list
                 int x0, y0, w, h;
                 contentRect(x0, y0, w, h);
-                int visible = (h - 20) / Theme::ROW_LIST; // синхронно с drawAboutScreen()
+                int visible = (h - 20) / Theme::ROW_LIST; // in sync with drawAboutScreen()
                 if (visible < 1) visible = 1;
                 int top = fieldIndex[cat] + in.rotationSteps;
                 int maxTop = aboutRowCount() - visible;
@@ -783,7 +918,7 @@ void Ui::handleInput(const InputState& in) {
 
         if (cur == Section::Wifi) {
             int tab = subTabIndex[cat];
-            if (tab == 0) { // Connect — список сетей; hold OK — rescан
+            if (tab == 0) { // Connect — network list; hold OK — rescan
                 int n = WifiMgr::resultCount();
                 if (n > 0 && in.rotationSteps != 0) {
                     int idx = fieldIndex[cat];
@@ -812,7 +947,7 @@ void Ui::handleInput(const InputState& in) {
         }
 
         if (cur == Section::Files) {
-            if (subTabIndex[cat] == 2) { // WebUI — статус + тоггл
+            if (subTabIndex[cat] == 2) { // WebUI — status + toggle
                 if (in.event == InputEvent::Click) {
                     webUiEnabled = !webUiEnabled;
                     if (webUiEnabled) {
@@ -833,13 +968,13 @@ void Ui::handleInput(const InputState& in) {
             String& path = filesPath[subTabIndex[cat]];
             int n = Files::listCount(root, path);
 
-            // Quit при играющем треке — сначала стоп, навигация вторым Quit
+            // Quit while a track is playing — stop first, navigation on the second Quit
             if (playing && in.event == InputEvent::UserKey) {
                 stopPlayback();
                 lastFrameAnimated = true;
                 return;
             }
-            // Quit внутри директории — на уровень ВВЕРХ; из корня — в Files
+            // Quit inside a directory — one level UP; from the root — to Files
             if (in.event == InputEvent::UserKey && path != "/") {
                 int slash = path.substring(0, path.length() - 1).lastIndexOf('/');
                 path = slash > 0 ? path.substring(0, slash) : "/";
@@ -866,16 +1001,25 @@ void Ui::handleInput(const InputState& in) {
                     bool ok = ename.endsWith(".lua") ? LuaEngine::runFile(full) : JsEngine::runFile(full);
                     lastScriptResult = ok ? "OK: " + ename
                                            : "ERR: " + (ename.endsWith(".lua") ? LuaEngine::lastError() : JsEngine::lastError());
-                    // результат показываем сразу и гасим через 4 с
+                    // show the result right away and fade it out after 4 s
                     lastScriptResultAt = millis();
                     lastFrameAnimated = true;
                 }
             }
             if (in.event == InputEvent::LongPress) {
-                // hold на аудиофайле — играть, иначе — вверх по папке
+                // hold on an audio file — play, hold on .bin — flash,
+                // otherwise — up the folder tree
                 FsEntry e = Files::listEntry(root, path, fieldIndex[cat]);
                 String ename(e.name);
                 String lower = ename; lower.toLowerCase();
+                if (n > 0 && lower.endsWith(".bin")) {
+                    String full = path;
+                    if (!full.endsWith("/")) full += "/";
+                    full += e.name;
+                    flashFirmwareFile(root, full);
+                    lastFrameAnimated = true;
+                    return;
+                }
                 if (n > 0 && (lower.endsWith(".mp3") || lower.endsWith(".wav"))) {
                     String full = path;
                     if (!full.endsWith("/")) full += "/";
@@ -908,19 +1052,19 @@ void Ui::handleInput(const InputState& in) {
         if (in.event == InputEvent::Click) {
             int idx = subTabIndex[cat];
             if (itemIsFeature(cat, idx)) {
-                // пункт-фича: гвард 120 мс — не провалиться внутрь случайно
+                // feature item: 120 ms guard — do not enter it by accident
                 if (millis() - subTabEnteredAt < 120) return;
                 int builtin = cat < (int)Section::COUNT ? builtinTabCount(cur) : 0;
                 enterFeature(Features::feature(cat, idx - builtin));
             } else if (cur == Section::Files && idx == 2) {
-                // WebUI: клик открывает экран статуса (Field)
+                // WebUI: a click opens the status screen (Field)
                 focusLevel = FocusLevel::Field;
             } else if (cur == Section::Settings && idx >= 3) {
-                // Sleep / Reboot — действия, не вход в Field
+                // Sleep / Reboot — actions, not entering Field
                 performDashboardAction(idx - 3);
                 return;
             } else if (sectionFieldEditable(cur)) {
-                // гвард 120 мс: случайно не «провалиться» в Field вторым кликом
+                // 120 ms guard: do not accidentally enter Field with a second click
                 if (millis() - subTabEnteredAt < 120) return;
                 focusLevel = FocusLevel::Field;
                 if (cur == Section::Settings) customizeOpen = -1;
@@ -951,7 +1095,7 @@ void Ui::handleInput(const InputState& in) {
 }
 
 // =====================================================================
-//  Фичи реестра: вход / ввод / выход
+//  Registry features: enter / input / exit
 // =====================================================================
 void Ui::enterFeature(const Feature* f) {
     if (!f) return;
@@ -967,8 +1111,8 @@ void Ui::handleFeatureInput(const InputState& in) {
     if (activeFeature->onInput && (in.event != InputEvent::None || in.rotationSteps != 0))
         consumed = activeFeature->onInput(in);
 
-    // Не съеденный Quit — выход из фичи на уровень списка пунктов (конвенция
-    // GUI: Quit = на уровень выше). LongPress и остальное — забота фичи.
+    // An unconsumed Quit — exit the feature to the item-list level (GUI
+    // convention: Quit = one level up). LongPress and the rest are the feature's job.
     if (!consumed && in.event == InputEvent::UserKey) {
         if (activeFeature->onExit) activeFeature->onExit();
         activeFeature = nullptr;
@@ -980,14 +1124,14 @@ void Ui::handleFeatureInput(const InputState& in) {
 }
 
 // =====================================================================
-//  Modal: ввод — экранная QWERTY / настройки WebUI (логика прежняя)
+//  Modal: input — on-screen QWERTY / WebUI settings (logic unchanged)
 // =====================================================================
 void Ui::handleModalInput(const InputState& in) {
     if (modalKind != ModalKind::WifiPassword) { focusLevel = FocusLevel::Field; modalKind = ModalKind::None; return; }
 
     const int* rowLen = kbMode == 0 ? kb::lettersRowLen : kb::symsRowLen;
     int totalGridKeys = rowLen[0] + rowLen[1] + rowLen[2];
-    int total = totalGridKeys + 4;
+    int total = totalGridKeys + 6;
 
     if (in.rotationSteps != 0) kbIndex = ((kbIndex + in.rotationSteps) % total + total) % total;
 
@@ -1006,6 +1150,7 @@ void Ui::handleModalInput(const InputState& in) {
 
     if (in.event == InputEvent::Click) {
         if (label == "DEL") { if (pwBuffer.length()) pwBuffer.remove(pwBuffer.length() - 1); }
+        else if (label == "TXT") { kbShowPlain = !kbShowPlain; }
         else if (label == "123") { kbMode = 1; kbIndex = 0; }
         else if (label == "ABC") { kbMode = 0; kbIndex = 0; }
         else if (label == "SPACE") { pwBuffer += ' '; }
@@ -1017,7 +1162,7 @@ void Ui::handleModalInput(const InputState& in) {
             modalKind = ModalKind::None;
             focusLevel = FocusLevel::Field;
         } else if (label == "^") {
-            // клик по шифту сознательно ничего не делает — только удержание (ниже)
+            // clicking Shift intentionally does nothing — only holding does (below)
         } else if (label.length() == 1) {
             char ch = label[0];
             if (kbMode == 0 && kbCaps) ch = (char)toupper(ch);
@@ -1034,7 +1179,7 @@ void Ui::handleModalInput(const InputState& in) {
 }
 
 // =====================================================================
-//  Terminal-Lite: общие элементы
+//  Terminal-Lite: shared elements
 // =====================================================================
 void Ui::drawSplash() {
     canvas.fillSprite(Theme::BG);
@@ -1064,7 +1209,14 @@ void Ui::drawHeader() {
     canvas.drawString("MEGAWARE", Theme::PAD, 2);
     canvas.setTextSize(Theme::SIZE_TEXT);
 
-    // правая часть: wifi / батарея+проценты / часы
+    // web-sweep indicator: shows on the device that the CC1101 is busy with the browser
+    if (SubGhz::webSpectrumActive()) {
+        canvas.setTextDatum(textdatum_t::middle_left);
+        canvas.setTextColor(Theme::ACCENT, Theme::BG);
+        canvas.drawString("RF SWEEP", Theme::PAD + 100, Theme::HEADER_H / 2);
+    }
+
+    // right side: wifi / battery+percent / clock
     char timeBuf[8] = "--:--";
     struct tm t;
     if (timeConfigured && getLocalTime(&t, 0)) {
@@ -1074,7 +1226,7 @@ void Ui::drawHeader() {
     canvas.setTextDatum(textdatum_t::middle_right);
     canvas.setTextColor(Theme::TEXT, Theme::BG);
     canvas.drawString(timeBuf, rightX, Theme::HEADER_H / 2);
-    // батарея правее часов не наезжает: время 282..312, батарея+проценты до 274
+    // the battery does not overlap the clock: time 282..312, battery+percent up to 274
     drawBatteryIcon(rightX - 84, 5);
     drawWifiIcon(rightX - 102, 6, WifiMgr::isConnected());
 
@@ -1086,7 +1238,7 @@ void Ui::drawBatteryIcon(int x, int y) {
     bool charging = Battery::isCharging();
     canvas.setTextDatum(textdatum_t::middle_left);
 
-    // корпус + контакт
+    // body + contact
     canvas.drawRect(x, y, 16, 8, Theme::TEXT_DIM);
     canvas.fillRect(x + 16, y + 2, 2, 4, Theme::TEXT_DIM);
     if (pct >= 0) {
@@ -1191,7 +1343,7 @@ const char* Ui::sectionDisplayName(int cat) const {
 }
 
 // =====================================================================
-//  Экраны: главное меню / список пунктов раздела
+//  Screens: main menu / section item list
 // =====================================================================
 void Ui::drawMainMenu() {
     int x0, y0, w, h;
@@ -1245,7 +1397,7 @@ void Ui::drawSectionList() {
 }
 
 // =====================================================================
-//  Экраны уровня Field (строки): LED / Display / Time / About, Wi-Fi, Files
+//  Field-level screens (rows): LED / Display / Time / About, Wi-Fi, Files
 // =====================================================================
 void Ui::drawFieldScreen() {
     int cat = catOf(sidebarIndex);
@@ -1253,7 +1405,7 @@ void Ui::drawFieldScreen() {
     int x0, y0, w, h;
     contentRect(x0, y0, w, h);
 
-    // заголовок пункта акцентом, контент ниже
+    // item title in the accent color, content below
     canvas.setFont(&fonts::Font0);
     canvas.setTextSize(Theme::SIZE_MENU);
     canvas.setTextDatum(textdatum_t::top_left);
@@ -1269,7 +1421,7 @@ void Ui::drawFieldScreen() {
             else if (customizeOpen == 2) drawThemeScreen(x0, cy, w, h - 22);
             else {
                 MwDraw::card(canvas, x0, cy, w, h - 22, "CUSTOMIZE");
-                // крупный текст как в главном меню (был мелкий Font0 1x)
+                // large text like the main menu (used to be small Font0 1x)
                 canvas.setFont(&fonts::Font0);
                 canvas.setTextSize(Theme::SIZE_MENU);
                 canvas.setTextDatum(textdatum_t::middle_left);
@@ -1303,19 +1455,23 @@ void Ui::drawLedScreen(int x0, int y0, int w, int h) {
     snprintf(g, sizeof(g), "%d", ledG);
     snprintf(b, sizeof(b), "%d", ledB);
     snprintf(sp, sizeof(sp), "%d%%", ledSpeedPct);
-    const char* labels[6] = {"Brightness", "R", "G", "B", "Mode", "Speed"};
-    const char* values[6] = {br, r, g, b, modeNames[ledModeIdx], sp};
+    // rows are in sync with input (customizeOpen == 0): 6/7 — toggles,
+    // values are pulled straight from Board (settable from WebUI too)
+    const char* labels[8] = {"Brightness", "R", "G", "B", "Mode", "Speed", "Click blip", "Rotate glow"};
+    const char* values[8] = {br, r, g, b, modeNames[ledModeIdx], sp,
+                             Board::getLedClickBlip() ? "on" : "off",
+                             Board::getLedRotGlow() ? "on" : "off"};
 
     int visible = h / Theme::ROW_LIST;
-    int top = scrollWindow(0x3000, sel, visible, 6);
-    for (int i = 0; i < visible && top + i < 6; i++) {
+    int top = scrollWindow(0x3000, sel, visible, 8);
+    for (int i = 0; i < visible && top + i < 8; i++) {
         int idx = top + i;
         int y = y0 + i * Theme::ROW_LIST + Theme::ROW_LIST / 2;
         drawListRow(canvas, x0, y, w, idx == sel, idx == sel && ledEditingRow,
                     labels[idx], values[idx], Theme::TEXT);
     }
 
-    // маленький свотч текущего цвета справа сверху
+    // small swatch of the current color at the top right
     canvas.fillRect(x0 + w - 14, y0, 14, 14, RGB565(ledR, ledG, ledB));
     canvas.drawRect(x0 + w - 14, y0, 14, 14, Theme::TEXT_DIM);
 }
@@ -1327,6 +1483,8 @@ void Ui::drawDisplayScreen(int x0, int y0, int w, int h) {
     snprintf(br, sizeof(br), "%d%%", (int)(displayBrightness * 100 / 255));
     if (displayAutoDimSec == 0) snprintf(dim, sizeof(dim), "off");
     else snprintf(dim, sizeof(dim), "%ds", displayAutoDimSec);
+    // rows are in sync with input (customizeOpen == 1): Brightness -> brightness,
+    // Auto-dim -> auto-dim timeout, Rotation -> screen orientation
     const char* labels[3] = {"Brightness", "Auto-dim", "Rotation"};
     const char* values[3] = {br, dim, displayFlipped ? "Flipped" : "Normal"};
 
@@ -1368,10 +1526,10 @@ void Ui::drawThemeScreen(int x0, int y0, int w, int h) {
     (void)h;
 }
 
-// ---- About: плоский прокручиваемый список «ключ: значение» ----
+// ---- About: flat scrollable "key: value" list ----
 namespace {
-    // Проверка интернета: лёгкий HTTP 204 (выполняется в tick по флагу,
-    // который ставит страница NETWORK — не блокируем отрисовку)
+    // Internet check: lightweight HTTP 204 (runs in tick on a flag set
+    // by the NETWORK page — drawing is not blocked)
     int netCheckState = -1;
     uint32_t netCheckAt = 0;
     bool netCheckRun = false;
@@ -1389,17 +1547,9 @@ namespace {
         Features::requestRedraw();
     }
 
-    // I2C-probe NFC не на каждом кадре — кэш на 10 секунд
-    bool pn532Cached = false;
-    bool pn532Present = false;
-    uint32_t pn532At = 0;
+    // PN532 via Nfc::ensure() (RST pulse + init — not a bare probe)
     bool pn532Probe() {
-        if (!pn532Cached || millis() - pn532At > 10000) {
-            pn532Present = i2cProbe(I2C_ADDR_PN532);
-            pn532At = millis();
-            pn532Cached = true;
-        }
-        return pn532Present;
+        return Nfc::ensure();
     }
 }
 
@@ -1407,7 +1557,7 @@ int Ui::aboutRowCount() const { return 35; }
 
 void Ui::drawAboutScreen(int x0, int y0, int w, int h) {
     int cat = (int)Section::Settings;
-    int top = fieldIndex[cat]; // смещение прокрутки (см. handleInput)
+    int top = fieldIndex[cat]; // scroll offset (see handleInput)
     if (top < 0) top = 0;
     int visible = (h - 20) / Theme::ROW_LIST;
     if (visible < 1) visible = 1;
@@ -1483,7 +1633,7 @@ void Ui::drawAboutScreen(int x0, int y0, int w, int h) {
                 drawKV(x0, y, w, "BQ27220", v2, Battery::isPresent() ? Theme::OK : Theme::TEXT_DIM); break;
             case 25:
                 snprintf(v2, sizeof(v2), "%s", pn532Probe() ? "detected" : "not found");
-                drawKV(x0, y, w, "PN532", v2, pn532Present ? Theme::OK : Theme::TEXT_DIM); break;
+                drawKV(x0, y, w, "PN532", v2, pn532Probe() ? Theme::OK : Theme::TEXT_DIM); break;
             case 26: drawKV(x0, y, w, "BLE", "available", Theme::TEXT_DIM); break;
             case 27: drawKV(x0, y, w, "", "FIRMWARE", Theme::ACCENT); break;
             case 28:
@@ -1534,7 +1684,7 @@ void Ui::drawWifiScreen(int x0, int y0, int w, int h, int tab) {
 
     if (tab == 0) { // Connect
         int listTop = y0;
-        // статус
+        // status
         static char sbuf[64];
         if (WifiMgr::isConnected()) {
             snprintf(sbuf, sizeof(sbuf), "Wi-Fi: %s", translitCyrillic(WifiMgr::currentSSID()).c_str());
@@ -1572,7 +1722,7 @@ void Ui::drawWifiScreen(int x0, int y0, int w, int h, int tab) {
             WifiNetwork net = WifiMgr::result(idx);
             bool s = (idx == sel);
             int y = listTop + i * Theme::ROW_LIST + Theme::ROW_LIST / 2;
-            // без String: транслит сразу в буфер строки (кадр рисуется часто)
+            // no String: translit straight into the row buffer (the frame is drawn often)
             char label[52];
             size_t pos = (size_t)snprintf(label, sizeof(label), "%c ", net.secure ? '*' : ' ');
             translitToBuf(net.ssid, label + pos, sizeof(label) - pos);
@@ -1585,11 +1735,11 @@ void Ui::drawWifiScreen(int x0, int y0, int w, int h, int tab) {
     }
 }
 
-// ---- Files: браузер SD / Flash ----
+// ---- Files: SD / Flash browser ----
 void Ui::drawFilesScreen(int x0, int y0, int w, int h) {
     int cat = (int)Section::Files;
     int tab = subTabIndex[cat];
-    if (tab == 2) { // WebUI — статус + тоггл
+    if (tab == 2) { // WebUI — status + toggle
         MwDraw::card(canvas, x0, y0, w, h, "WEBUI");
         canvas.setFont(&fonts::Font0);
         canvas.setTextSize(Theme::SIZE_MENU);
@@ -1616,7 +1766,7 @@ void Ui::drawFilesScreen(int x0, int y0, int w, int h) {
     canvas.setFont(&fonts::Font0);
     canvas.setTextDatum(textdatum_t::middle_left);
 
-    // путь
+    // path
     static char pbuf[64];
     snprintf(pbuf, sizeof(pbuf), "%s%s", tab == 0 ? "SD:" : "FL:", path.c_str());
     canvas.setTextColor(Theme::ACCENT, Theme::BG);
@@ -1665,7 +1815,7 @@ void Ui::drawFilesScreen(int x0, int y0, int w, int h) {
 }
 
 // =====================================================================
-//  Modal: экранная QWERTY-клавиатура (Terminal-Lite)
+//  Modal: on-screen QWERTY keyboard (Terminal-Lite)
 // =====================================================================
 void Ui::drawModalWifiKeyboard() {
     canvas.fillSprite(Theme::BG);
@@ -1686,8 +1836,14 @@ void Ui::drawModalWifiKeyboard() {
         canvas.drawString("CAPS", Theme::SCREEN_W - Theme::PAD, 2);
         canvas.setTextDatum(textdatum_t::top_center);
     }
+    if (kbShowPlain) {
+        canvas.setTextDatum(textdatum_t::top_left);
+        canvas.setTextColor(Theme::ACCENT, Theme::BG);
+        canvas.drawString("TXT", Theme::PAD, 2);
+        canvas.setTextDatum(textdatum_t::top_center);
+    }
 
-    // строка пароля: маска или открытый текст (TXT) + счётчик символов
+    // password row: mask or plain text (TXT) + character counter
     canvas.setTextDatum(textdatum_t::middle_left);
     canvas.setTextColor(Theme::TEXT, Theme::BG);
     String shown;
@@ -1723,7 +1879,7 @@ void Ui::drawModalWifiKeyboard() {
             int cx = gridX0 + c * cellW;
             int cy = y0 + r * rowH;
             if (sel) {
-                // выбранная клавиша — инверсия (акцентный блок, чёрный текст)
+                // selected key — inverted (accent block, black text)
                 canvas.fillRect(cx, cy, cellW - 3, rowH - 4, Theme::ACCENT);
                 canvas.setTextColor(Theme::BG, Theme::ACCENT);
             } else {
@@ -1737,8 +1893,8 @@ void Ui::drawModalWifiKeyboard() {
     }
 
     int fy = y0 + 3 * rowH;
-    int fw = 300 / 4;
-    for (int i = 0; i < 4; i++) {
+    int fw = 300 / 6;
+    for (int i = 0; i < 6; i++) {
         bool sel = (idx == kbIndex);
         int cx = gridX0 + i * fw;
         if (sel) {
@@ -1751,7 +1907,7 @@ void Ui::drawModalWifiKeyboard() {
         idx++;
     }
 
-    // статус подключения
+    // connection status
     canvas.setTextDatum(textdatum_t::middle_center);
     WifiConnState cs = WifiMgr::connState();
     if (cs == WifiConnState::Connecting) {
@@ -1767,5 +1923,5 @@ void Ui::drawModalWifiKeyboard() {
 }
 
 // =====================================================================
-//  Modal: настройки WebUI (AP-адрес) — Terminal-Lite
+//  Modal: WebUI settings (AP address) — Terminal-Lite
 // =====================================================================

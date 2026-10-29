@@ -64,6 +64,7 @@ void loop() {
     InputState in = Board::pollInput();
 
     ui.tick(in);
+    WifiMgr::serviceAutoConnect(); // ретраи автоконнекта (сеть не сразу видна)
     if (in.powerHeldMs >= 3000) {
         delay(80); // дать последнему кадру "3/3" реально уйти на экран
         Board::enterDeepSleep();

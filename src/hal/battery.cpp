@@ -7,9 +7,9 @@ namespace {
     BQ27220 gauge;
     bool present = false;
 
-    // Топбар читает батарею на КАЖДОМ кадре (percent + isCharging — это
-    // две I2C-транзакции), при быстром вращении энкодера — сотни в секунду.
-    // Батарея меняется медленно: кэш на 1 секунду, время в кадре дороже.
+    // The topbar reads the battery on EVERY frame (percent + isCharging are
+    // two I2C transactions); with fast encoder rotation that is hundreds
+    // per second. The battery changes slowly: 1-second cache, frame time matters more.
     constexpr uint32_t CACHE_MS = 1000;
     uint32_t cacheAt = 0;
     int cachedPct = -1;
@@ -30,7 +30,7 @@ namespace {
 
 bool Battery::begin() {
     present = gauge.begin(Wire, 0x55, PIN_I2C_SDA, PIN_I2C_SCL, 400000);
-    cacheAt = 0; // первое чтение — сразу, не из кэша
+    cacheAt = 0; // first read — immediately, not from cache
     return present;
 }
 

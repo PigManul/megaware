@@ -1,9 +1,9 @@
 // =====================================================================
-//  Sub-GHz: Capture — RAW-захват, реплей и сохранение в формате
-//  Flipper (.sub). Управление:
-//    клик:  начать захват / остановить захват / реплей
-//    hold:  сохранить захват (SD, иначе Flash) в /subghz/cap_<ms>.sub
-//  Частота — текущая полоса (SubGhz::currentFrequencyMHz).
+//  Sub-GHz: Capture — RAW capture, replay and saving in Flipper
+//  format (.sub). Controls:
+//    click:  start capture / stop capture / replay
+//    hold:  save the capture (SD, else Flash) to /subghz/cap_<ms>.sub
+//  Frequency — the current band (SubGhz::currentFrequencyMHz).
 // =====================================================================
 #include "../ui/features.h"
 #include "../radio/subghz.h"
@@ -15,10 +15,10 @@
 namespace {
     enum State : uint8_t { Idle, Capturing, Captured };
     State state = Idle;
-    uint32_t captureStart = 0;   // старт захвата или момент реплея
-    uint32_t savedShowUntil = 0; // сколько ещё показывать «SAVED <path>»
+    uint32_t captureStart = 0;   // capture start or replay moment
+    uint32_t savedShowUntil = 0; // how much longer to show "SAVED <path>"
     char savedPath[64] = "";
-    uint32_t captureMs = 3000; // длина захвата, вращением 1..10 с
+    uint32_t captureMs = 3000; // capture length, 1..10 s via rotation
 
     void draw(LGFX_Sprite& c, int x0, int y0, int w, int h) {
         MwDraw::card(c, x0, y0, w, h, "RAW CAPTURE");
@@ -97,7 +97,7 @@ namespace {
             return true;
         }
         if (in.rotationSteps != 0 && state == Capturing) {
-            Features::requestRedraw(); // живой счётчик фронтов
+            Features::requestRedraw(); // live edge counter
             return true;
         }
         return false;

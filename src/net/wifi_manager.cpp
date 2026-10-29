@@ -10,9 +10,14 @@ namespace {
     String pendingPass; // для сохранения кредов в NVS после успешного подключения
     bool radioStarted = false;
     bool apRunning = false;
-    String autoSSID, autoPass;
-    bool autoConnectPending = false;
     bool mdnsRunning = false;
+
+    // --- автоконнект по сохранённой сети ---
+    bool autoAttempt = false;      // текущая попытка инициирована автоконнектом
+    int  autoRetries = 0;
+    uint32_t autoRetryAt = 0;      // millis(), когда ретраить после Failed
+    constexpr uint32_t AUTO_RETRY_MS = 15000;
+    constexpr int AUTO_RETRY_MAX = 4;
 
     // ВАЖНО про память: WiFi.mode(WIFI_STA) реально поднимает
     // lwIP/Wi-Fi-стек — десятки КБ heap, даже если Wi-Fi ни разу не
@@ -32,14 +37,28 @@ void WifiMgr::begin() {
 }
 
 void WifiMgr::tryAutoConnect() {
-    if (autoConnectPending || state == WifiConnState::Connecting || isConnected()) return;
+    if (state == WifiConnState::Connecting || isConnected()) return;
     String ssid = Config::getString("wifi_ssid", "");
     if (ssid.length() == 0) return; // ничего не сохранено — радио не трогаем вообще
     String pass = Config::getString("wifi_pass", "");
-    autoSSID = ssid;
-    autoPass = pass;
-    autoConnectPending = true;
-    startScan();
+    // Прямой connect БЕЗ скана эфира: WiFi.begin делает точечный поиск
+    // целевой сети. Прежний вариант ждал полного скана и отваливался,
+    // если сеть не успевала появиться в результатах.
+    autoAttempt = true;
+    autoRetries = 0;
+    connect(ssid, pass);
+}
+
+void WifiMgr::serviceAutoConnect() {
+    // Ретраи автоконнекта: радио могло подняться позже, чем сеть стала
+    // видна. Failed от автопопытки (не ручной) переподнимаем по таймеру,
+    // пока не подключимся или не кончатся попытки.
+    if (!autoAttempt || state != WifiConnState::Failed) return;
+    if (millis() < autoRetryAt) return;
+    if (autoRetries >= AUTO_RETRY_MAX) { autoAttempt = false; return; }
+    autoRetries++;
+    connect(Config::getString("wifi_ssid", ""), Config::getString("wifi_pass", ""));
+    autoAttempt = true;
 }
 
 void WifiMgr::startScan() {
@@ -66,7 +85,6 @@ WifiNetwork WifiMgr::result(int index) {
 
 void WifiMgr::connect(const String& ssid, const String& password) {
     ensureRadioStarted();
-    autoConnectPending = false;
     if (state == WifiConnState::Connecting || isConnected()) WiFi.disconnect(false, false);
     // Асинхронное сканирование хранит список сетей в heap до scanDelete().
     // После выбора сети он больше не нужен.
@@ -84,7 +102,6 @@ void WifiMgr::disconnect() {
 
 void WifiMgr::releaseIdleResources() {
     if (isConnected() || apRunning) return;
-    autoConnectPending = false;
     WiFi.scanDelete();
     WiFi.disconnect(true, false);
     if (mdnsRunning) { MDNS.end(); mdnsRunning = false; } // иначе задача mDNS висит с выключенным радио
@@ -93,24 +110,15 @@ void WifiMgr::releaseIdleResources() {
     state = WifiConnState::Idle;
     pendingSSID = String();
     pendingPass = String();
-    autoSSID = String();
-    autoPass = String();
+    autoAttempt = false;
+    autoRetries = 0;
 }
 
 WifiConnState WifiMgr::connState() {
-    if (autoConnectPending && !isScanning()) {
-        autoConnectPending = false;
-        int count = resultCount();
-        for (int i = 0; i < count; ++i) {
-            if (WiFi.SSID(i) == autoSSID) {
-                connect(autoSSID, autoPass);
-                break;
-            }
-        }
-    }
     if (state == WifiConnState::Connecting) {
         if (WiFi.status() == WL_CONNECTED) {
             state = WifiConnState::Connected;
+            autoAttempt = false;
             if (!mdnsRunning) {
                 mdnsRunning = MDNS.begin("megaware");
                 if (mdnsRunning) MDNS.addService("http", "tcp", 80);
@@ -123,6 +131,7 @@ WifiConnState WifiMgr::connState() {
             Config::setString("wifi_pass", pendingPass);
         } else if (millis() - connectStartedAt > CONNECT_TIMEOUT_MS) {
             state = WifiConnState::Failed;
+            if (autoAttempt) autoRetryAt = millis() + AUTO_RETRY_MS;
         }
     } else if (state == WifiConnState::Connected && WiFi.status() != WL_CONNECTED) {
         state = WifiConnState::Idle;
@@ -162,7 +171,7 @@ void WifiMgr::startAP(int preset) {
     radioStarted = true;
     delay(20);
     const bool configured = WiFi.softAPConfig(ip, gw, mask);
-    const bool started = WiFi.softAP("MEGAWARE", "megaware123");
+    const bool started = WiFi.softAP("MEGAWARE"); // open AP — клиент всегда может подключиться
     apRunning = configured && started;
     if (apRunning && !mdnsRunning) {
         mdnsRunning = MDNS.begin("megaware");

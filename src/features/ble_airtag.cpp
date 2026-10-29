@@ -1,9 +1,9 @@
 // =====================================================================
-//  Bluetooth: Trackers — детектор Apple Find My-трекеров (AirTag и
-//  подобные) рядом с устройством. Пассивный приём advertising.
-//  Цикл: скан 2 c каждые ~6 c; если чужой трекер в поле — LED мигает
-//  красным (Board::setLedMode(Solid) красным до ухода трекера).
-//  Quit — выход (LED возвращается к настройкам пользователя).
+//  Bluetooth: Trackers — detector of Apple Find My trackers (AirTag and
+//  similar) near the device. Passive reception of advertising.
+//  Cycle: a 2 s scan every ~6 s; if a foreign tracker is in range — the LED
+//  goes red (Board::setLedMode(Solid) red until the tracker leaves).
+//  Quit — exit (the LED returns to the user's settings).
 // =====================================================================
 #include "../ui/features.h"
 #include "../hal/blescan.h"
@@ -72,7 +72,7 @@ namespace {
                 snprintf(bestName, sizeof(bestName), "%s", e.name[0] ? e.name : e.addr);
             }
         }
-        BleScan::deinit(); // между проходами стек выгружен — heap не занят
+        BleScan::deinit(); // between passes the stack is unloaded — the heap is not held
         if (seenCount > 0 && !wasLedTouched) {
             Board::setLedColor(0xFF, 0x50, 0x50);
             Board::setLedMode(LedMode::Solid);
@@ -87,7 +87,7 @@ namespace {
 
     void onExit() {
         if (wasLedTouched) {
-            Board::setLedMode(LedMode::Breathing); // вернуть пользовательский цвет
+            Board::setLedMode(LedMode::Breathing); // restore the user color
             wasLedTouched = false;
         }
     }

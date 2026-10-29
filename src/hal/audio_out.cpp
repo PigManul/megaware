@@ -46,7 +46,7 @@ bool begin(uint32_t sampleRateHz) {
 bool write(const int16_t* samples, int count) {
     if (!installed || count <= 0) return false;
     size_t written = 0;
-    // блокирующая запись в DMA: чанки небольшие, тик успевает
+    // blocking write to DMA: chunks are small, the tick keeps up
     i2s_write(I2S_NUM_1, samples, count * sizeof(int16_t), &written, pdMS_TO_TICKS(60));
     return written > 0;
 }

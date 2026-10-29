@@ -6,16 +6,16 @@
 #include <LittleFS.h>
 
 namespace {
-    // IRQ/RESET на этой плате к I2C-режиму не подключаются: драйвер в
-    // I2C-режиме опрашивает RDY-байт по шине (см. isready() в
-    // Adafruit_PN532.cpp), пины используются только в GPIO-режимах.
-    // -1 -> 255: begin() сам guard'ит _reset, pinMode(255) — no-op ядра.
+    // IRQ/RESET are not wired to the I2C mode on this board: in I2C mode
+    // the driver polls the RDY byte over the bus (see isready() in
+    // Adafruit_PN532.cpp); the pins are only used in GPIO modes.
+    // -1 -> 255: begin() guards _reset itself, pinMode(255) is a core no-op.
     Adafruit_PN532 pn532(/*irq*/ -1, /*reset*/ -1, &Wire);
 
     bool inited = false;
     bool ready = false;
 
-    // UID последней карты — нужен для авторизации секторов Classic
+    // UID of the last card — needed to authenticate Classic sectors
     uint8_t lastUid[10];
     uint8_t lastUidLen = 0;
     bool lastIsClassic = false;
@@ -23,26 +23,26 @@ namespace {
     uint16_t lastPages = 0;
     uint16_t lastBlocks = 0;
 
-    // Дефолтные/транспортные ключи MIFARE (перебор сверху вниз)
+    // Default/transport MIFARE keys (tried top to bottom)
     const uint8_t KEYS[][6] = {
-        {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // заводской
+        {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // factory
         {0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5}, // MAD / NDEF
-        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, // «нулевой»
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, // "all zeros"
         {0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5},
         {0x4D, 0x3A, 0x99, 0xC3, 0x51, 0xDD},
         {0x1A, 0x98, 0x2C, 0x7E, 0x45, 0x9A},
     };
     constexpr uint8_t KEY_COUNT = sizeof(KEYS) / sizeof(KEYS[0]);
 
-    // Кэш авторизации последнего сектора, чтобы не авторизовывать
-    // каждый блок заново (auth — самая дорогая операция дампа).
+    // Cache of the last authenticated sector so each block does not have
+    // to be authenticated again (auth is the most expensive dump operation).
     int8_t authedSector = -1;
     uint8_t authedKeyIdx = 0;
-    uint8_t lastKeyBytes[6] = {0};   // ключ, открывший последний auth
+    uint8_t lastKeyBytes[6] = {0};   // key that opened the last auth
     bool lastKeyValid = false;
     void invalidateAuth() { authedSector = -1; lastKeyValid = false; }
 
-    // Пользовательский словарь ключей (/rfid/keys.txt, hex по строке)
+    // User key dictionary (/rfid/keys.txt, one hex key per line)
     constexpr int MAX_EXTRA_KEYS = 24;
     uint8_t extraKeys[MAX_EXTRA_KEYS][6];
     int extraKeyCount = 0;
@@ -61,21 +61,21 @@ namespace Nfc {
 
 bool busPresent() {
     Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
-    Wire.beginTransmission(PN532_I2C_ADDRESS); // 0x24 (7-бит), дефолт библиотеки
+    Wire.beginTransmission(PN532_I2C_ADDRESS); // 0x24 (7-bit), library default
     return Wire.endTransmission() == 0;
 }
 
 bool ensure() {
     if (inited) return ready;
     inited = true;
-    // Явно ставим наши пины I2C: Adafruit_I2CDevice::begin() внутри
-    // pn532.begin() дергает Wire.begin() без аргументов, а ядро при
-    // уже запущенной шине их сохраняет — но перестрахуемся.
+    // Explicitly set our I2C pins: Adafruit_I2CDevice::begin() inside
+    // pn532.begin() calls Wire.begin() without arguments, and the core
+    // keeps them when the bus is already running — but play it safe.
     Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
 
-    // ВАЖНО: RST-пульс (GPIO45) ДО проверки шины. Если чип держится в
-    // reset (RST float/low), он не ACK-ает — прошлый порядок
-    // "busPresent -> решаем" отсекал живой модуль до пробуждения.
+    // IMPORTANT: RST pulse (GPIO45) BEFORE checking the bus. If the chip
+    // is held in reset (RST float/low), it does not ACK — the previous
+    // "busPresent -> decide" order discarded a live module before wakeup.
     pinMode(PIN_PN532_RST, OUTPUT);
     digitalWrite(PIN_PN532_RST, LOW);
     delay(50);
@@ -85,7 +85,7 @@ bool ensure() {
 
     pn532.begin();
 
-    // чип может просыпаться после reset — до 5 попыток
+    // the chip may still be waking up after reset — up to 5 attempts
     uint32_t ver = 0;
     for (int attempt = 0; attempt < 5 && !ver; attempt++) {
         ver = pn532.getFirmwareVersion();
@@ -103,7 +103,7 @@ bool readTag(Tag& out) {
 
     uint8_t uid[10];
     uint8_t uidLen = 0;
-    // Короткий таймаут: фича опрашивает поле из tick(), висеть нельзя
+    // Short timeout: the feature polls the field from tick(), must not hang
     if (!pn532.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLen, 60)) return false;
     if (uidLen == 0 || uidLen > 10) return false;
 
@@ -111,7 +111,7 @@ bool readTag(Tag& out) {
     memcpy(out.uid, uid, uidLen);
     out.uidLen = uidLen;
 
-    // Запоминаем для последующих операций над этой картой
+    // Remember for subsequent operations on this card
     memcpy(lastUid, uid, uidLen);
     lastUidLen = uidLen;
     invalidateAuth();
@@ -128,7 +128,7 @@ bool readTag(Tag& out) {
             snprintf(out.type, sizeof(out.type), "ISO14443A (4B, key unknown)");
         }
     } else if (uidLen == 7) {
-        // NTAG/Ultralight различаем по Capability Container (стр. 3)
+        // NTAG/Ultralight are told apart by the Capability Container (page 3)
         uint8_t page[4];
         if (pn532.ntag2xx_ReadPage(3, page) == 1 && page[0] == 0xE1) {
             out.isNtag = true;
@@ -155,11 +155,11 @@ bool readTag(Tag& out) {
 bool classicReadBlock(uint8_t block, uint8_t* data) {
     if (!ready || !lastIsClassic || lastUidLen == 0) return false;
 
-    // Сектор = блок/4 (секторы 0..30), у 4K секторы 32..39 по 16 блоков.
+    // Sector = block/4 (sectors 0..30); in 4K, sectors 32..39 hold 16 blocks each.
     uint8_t sector = (block < 128) ? block / 4 : 32 + (block - 128) / 16;
     if (sector != authedSector) {
         bool ok = false;
-        // 1) встроенные дефолтные/транспортные ключи
+        // 1) built-in default/transport keys
         for (uint8_t ki = 0; ki < KEY_COUNT && !ok; ki++) {
             if (pn532.mifareclassic_AuthenticateBlock(lastUid, lastUidLen, block, 0, (uint8_t*)KEYS[ki]) == 1) {
                 authedSector = sector;
@@ -169,7 +169,7 @@ bool classicReadBlock(uint8_t block, uint8_t* data) {
                 ok = true;
             }
         }
-        // 2) пользовательский словарь (/rfid/keys.txt)
+        // 2) user dictionary (/rfid/keys.txt)
         for (int ki = 0; ki < extraKeyCount && !ok; ki++) {
             if (pn532.mifareclassic_AuthenticateBlock(lastUid, lastUidLen, block, 0, extraKeys[ki]) == 1) {
                 authedSector = sector;
@@ -193,7 +193,7 @@ bool classicWriteBlock(uint8_t block, const uint8_t* data) {
     if (!ready || !lastIsClassic || lastUidLen == 0) return false;
     uint8_t sector = (block < 128) ? block / 4 : 32 + (block - 128) / 16;
     if (sector != authedSector) {
-        // авторизуем тем же перебором (запись=чтение по ключу A)
+        // authenticate with the same key trial loop (write = read via key A)
         bool ok = false;
         for (uint8_t ki = 0; ki < KEY_COUNT && !ok; ki++) {
             if (pn532.mifareclassic_AuthenticateBlock(lastUid, lastUidLen, block, 0, (uint8_t*)KEYS[ki]) == 1) {
@@ -234,22 +234,87 @@ bool apdu(const uint8_t* in, int inLen, uint8_t* out, int* outLen) {
 
 bool rats(uint8_t* ats, int* atsLen) {
     if (!ready || lastUidLen == 0) return false;
-    // RATS (ISO14443-4): первый cmd после активации у совместимых карт
+    // RATS (ISO14443-4): the first cmd after activation on compatible cards
     uint8_t ratsCmd[2] = {0xE0, 0x50};
     uint8_t resp[64];
     uint8_t respLen = 0;
     if (!pn532.inDataExchange(ratsCmd, 2, resp, &respLen)) return false;
     if (respLen < 2 || resp[0] < 1) return false; // ATS TLV
-    int n = respLen > 1 ? respLen - 1 : 0;        // без TL-байта
+    int n = respLen > 1 ? respLen - 1 : 0;        // without the TL byte
     if (n > *atsLen) n = *atsLen;
     memcpy(ats, resp + 1, n);
     *atsLen = n;
     return true;
 }
 
+// --- Emulation: PN532 in target mode ---
+
+bool emulateStart(const uint8_t* uid, uint8_t uidLen, uint8_t sak) {
+    if (!ready) return false;
+
+    // TGInitAsTarget: the PN532 would wait for an external field and reply
+    // with its UID. Command format (PN532 User Manual, rev. 8, section 7.3.2):
+    // [0x8C] mode(1) MifareParams(6) FelicaParams(18) NFCID3(10) len(1) genBytes(N)
+    // mode 0x04 = PICC only, passive, MIFARE compatible
+
+    uint8_t cmd[40];
+    memset(cmd, 0, sizeof(cmd));
+    cmd[0] = 0x8C;                      // TGInitAsTarget
+    cmd[1] = 0x04;                      // mode: PICC only, passive, MIFARE
+    // MifareParams (6 bytes): CUID[4], SAK, ATQA[2]
+    cmd[2] = uid[0];                    // CUID byte 0
+    cmd[3] = uidLen > 1 ? uid[1] : 0;
+    cmd[4] = uidLen > 2 ? uid[2] : 0;
+    cmd[5] = uidLen > 3 ? uid[3] : 0;
+    cmd[6] = sak;                       // SAK
+    cmd[7] = 0x04;                      // ATQA LSB (4-byte UID → ATQA 0x0004)
+    cmd[8] = 0x00;                      // ATQA MSB
+    // FelicaParams (18 bytes) — zeros for Type A
+    // NFCID3 (10 bytes) — zeros
+    // General bytes length = 0
+    // Total size: 1(cmd) + 1(mode) + 6 + 18 + 10 + 1(len) = 37
+
+    // Send via sendCommandCheckAck (public Adafruit method)
+    // Command 0x8C — TGInitAsTarget
+    // sendCommandCheckAck adds the 0xD4 prefix itself
+
+    // Using sendCommandCheckAck directly:
+    uint8_t tgCmd[37];
+    tgCmd[0] = 0x8C;
+    memcpy(tgCmd + 1, cmd + 1, 36);
+
+    if (!pn532.sendCommandCheckAck(tgCmd, 37, 1000)) return false;
+
+    // PN532 is now in target mode, waiting for the reader field
+    return true;
+}
+
+bool emulateStop() {
+    // Exiting target mode: FACTORYRESET or simply SAMConfig again
+    pn532.SAMConfig();
+    return true;
+}
+
+bool emulatePoll(uint8_t* data, uint8_t* dataLen, uint32_t timeoutMs) {
+    // getDataTarget: the PN532 hands over the data received from the reader
+    // In the Adafruit lib this is getDataTarget(uint8_t* cmd, uint8_t* cmdlen)
+    uint8_t tmp[64];
+    uint8_t tmpLen = 0;
+    if (!pn532.getDataTarget(tmp, &tmpLen)) return false;
+    if (tmpLen == 0) return false;
+    int n = tmpLen > *dataLen ? *dataLen : tmpLen;
+    memcpy(data, tmp, n);
+    *dataLen = n;
+    return true;
+}
+
+bool emulateRespond(const uint8_t* data, uint8_t len) {
+    return pn532.setDataTarget(const_cast<uint8_t*>(data), len);
+}
+
 bool ntagReadPage(uint16_t page, uint8_t* data) {
     if (!ready || !lastIsNtag) return false;
-    // NTAG21x-страницы > 255 читаются обычной командой чтения 4-байт страниц
+    // NTAG21x pages > 255 are read with the regular 4-byte page read command
     return pn532.mifareultralight_ReadPage((uint8_t)page, data) == 1 ||
            pn532.ntag2xx_ReadPage((uint8_t)page, data) == 1;
 }

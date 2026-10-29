@@ -1,7 +1,7 @@
 // =====================================================================
-//  Others: Backup — настройки (NVS) <-> /backup/settings.txt (SD, иначе
-//  Flash). Управление: клик — Save / Restore. ВНИМАНИЕ: Wi-Fi и web
-//  пароли пишутся на SD открытым текстом — это бэкап для СВОЕЙ карты.
+//  Others: Backup — settings (NVS) <-> /backup/settings.txt (SD, else
+//  Flash). Controls: click — Save / Restore. WARNING: Wi-Fi and web
+//  passwords are written to the SD in plain text — this backup is for YOUR OWN card.
 // =====================================================================
 #include "../ui/features.h"
 #include "../hal/config.h"

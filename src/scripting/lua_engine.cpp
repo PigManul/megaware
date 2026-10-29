@@ -6,6 +6,7 @@
 #include "../radio/subghz.h"
 #include "../net/wifi_manager.h"
 #include "game_io.h"
+#include <esp_system.h>
 #include <SD.h>
 #include <LittleFS.h>
 
@@ -188,6 +189,10 @@ namespace {
 
     int lua_sys_millis(lua_State* L)    { lua_pushinteger(L, (lua_Integer)millis()); return 1; }
     int lua_sys_freeHeap(lua_State* L)  { lua_pushinteger(L, (lua_Integer)ESP.getFreeHeap()); return 1; }
+    int lua_sys_rng(lua_State* L) {
+        lua_pushinteger(L, (lua_Integer)(esp_random() & 0x7FFFFFFF));
+        return 1;
+    }
 
     void setFn(lua_State* L, const char* name, lua_CFunction fn) {
         lua_pushcfunction(L, fn);
@@ -267,6 +272,7 @@ namespace {
         lua_newtable(L);
         setFn(L, "millis", lua_sys_millis);
         setFn(L, "freeHeap", lua_sys_freeHeap);
+        setFn(L, "rng", lua_sys_rng);
         lua_setglobal(L, "sys");
     }
 }

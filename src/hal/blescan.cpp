@@ -8,8 +8,8 @@ namespace {
     int findMyN = 0;
 
     bool looksLikeFindMy(const std::string& md) {
-        // Apple manufacturer data (0x004C) с offline-finding payload (тип 0x12):
-        // так рекламируются AirTag/Find My-трекеры и «оффлайн»-устройства Apple.
+        // Apple manufacturer data (0x004C) with an offline-finding payload (type 0x12):
+        // this is how AirTag/Find My trackers and Apple "offline" devices advertise.
         return md.size() >= 0x1B &&
                (uint8_t)md[0] == 0x4C && (uint8_t)md[1] == 0x00 &&
                (uint8_t)md[2] == 0x12;
@@ -20,8 +20,8 @@ namespace BleScan {
 
 bool scanBlocking(int seconds) {
     if (!inited) {
-        // имя общее с BLE Typer: стек Bluedroid инициализируется один раз,
-        // чей первый init() — то и имя устройства в эфире
+        // name shared with BLE Typer: the Bluedroid stack is initialized once,
+        // and whichever init() comes first sets the device name on air
         BLEDevice::init("MEGAWARE");
         inited = true;
     }
@@ -46,7 +46,7 @@ bool scanBlocking(int seconds) {
         if (e.findMy) findMyN++;
         entryCount++;
     }
-    // сортировка вставками по RSSI (по убыванию)
+    // insertion sort by RSSI (descending)
     for (int i = 1; i < entryCount; i++) {
         Entry t = entries[i];
         int j = i - 1;
@@ -63,7 +63,7 @@ int findMyCount() { return findMyN; }
 
 void deinit() {
     if (!inited) return;
-    // результаты уже в статическом массиве — стек можно выгружать
+    // results are already in the static array — the stack can be torn down
     BLEDevice::deinit(true);
     inited = false;
 }

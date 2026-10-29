@@ -9,7 +9,7 @@
 
 namespace {
     IRsend irsend(PIN_IR_TX);
-    IRrecv irrecv(PIN_IR_RX, 250); // буфер сырых таймингов (для длинных AC-пультов)
+    IRrecv irrecv(PIN_IR_RX, 250); // raw timing buffer (for long AC remotes)
     decode_results results;
     bool inited = false;
     bool recvOn = false;
@@ -30,9 +30,9 @@ bool begin() {
     return true;
 }
 
-    // Отправители IRremoteESP8266 принимают цельное 64-битное значение
-    // (кроме Panasonic: addr16 + data32). Flipper-адреса комбинируем:
-    // value = addr16 | cmd16<<16 — наши Capture-файлы округляются 1:1.
+    // The IRremoteESP8266 senders take a single 64-bit value
+    // (except Panasonic: addr16 + data32). Flipper addresses are combined:
+    // value = addr16 | cmd16<<16 — our Capture files round-trip 1:1.
     bool sendParsed(const String& proto, uint32_t address, uint32_t command) {
         if (proto == "PANASONIC") {
             irsend.sendPanasonic((uint16_t)address, command);
@@ -70,11 +70,27 @@ bool poll(Packet& out) {
     out.rawLen = 0;
     out.rawFreq = 38000;
     for (uint16_t i = 1; i < results.rawlen && out.rawLen < 200; i++) {
-        uint32_t us = (uint32_t)results.rawbuf[i] * RAWTICK; // RAWTICK = 50 мкс
+        uint32_t us = (uint32_t)results.rawbuf[i] * RAWTICK; // RAWTICK = 50 us
         if (us > 65000) us = 65000;
         out.raw[out.rawLen++] = (uint16_t)us;
     }
     return true;
+}
+
+static const char* const PROTOS[] = {
+    "NEC", "SONY", "RC5", "RC6", "SAMSUNG", "LG", "PANASONIC", "JVC",
+};
+constexpr int PROTO_COUNT = sizeof(PROTOS) / sizeof(PROTOS[0]);
+
+int protocolCount() { return PROTO_COUNT; }
+const char* protocolName(int idx) {
+    if (idx < 0 || idx >= PROTO_COUNT) return "?";
+    return PROTOS[idx];
+}
+
+bool sendByIndex(int protoIdx, uint32_t address, uint32_t command) {
+    if (protoIdx < 0 || protoIdx >= PROTO_COUNT) return false;
+    return sendParsed(PROTOS[protoIdx], address, command);
 }
 
 bool sendValue(const String& proto, uint64_t value, uint16_t bits) {
@@ -124,7 +140,7 @@ bool transmitFile(const String& path) {
 
     if (type == "parsed") {
         if (proto == "PANASONIC") {
-            // address: 2 байта, command: 4 байта
+            // address: 2 bytes, command: 4 bytes
             uint32_t addr = parseHexBytes(addrStr) & 0xFFFF;
             uint32_t cmd = parseHexBytes(cmdStr);
             return sendParsed(proto, addr, cmd);

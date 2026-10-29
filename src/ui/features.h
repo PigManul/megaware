@@ -4,28 +4,28 @@
 #include "../hal/board.h"
 
 // =====================================================================
-//  MEGAWARE feature registry — подключение функций одним файлом.
+//  MEGAWARE feature registry — plug in a function with a single file.
 //
-//  Функция (фича) = один .cpp в src/features/, который макросом
-//  REGISTER_FEATURE объявляет: название, категорию GUI, иконку,
-//  порядок и обработчики (вход/ввод/цикл/рисование/выход).
+//  A feature = one .cpp in src/features/ which, via the REGISTER_FEATURE
+//  macro, declares: name, GUI category, icon, order and handlers
+//  (enter/input/tick/draw/exit).
 //
-//  Категория = секция сайдбара. Совпадает со встроенной (MwCat::...) —
-//  фича дописывается пунктом в её подвкладки; не совпадает — новая
-//  секция сайдбара создаётся автоматически (иконка — иконка фичи).
+//  Category = sidebar section. Matches a built-in one (MwCat::...) —
+//  the feature is appended as an item to its subtabs; no match — a new
+//  sidebar section is created automatically (icon = the feature's icon).
 //
-//  Реестр целиком в статической памяти (никаких heap-аллокаций),
-//  заполняется статическими конструкторами до setup() и сортируется
-//  один раз в init() (вызывается из Ui::begin()).
+//  The registry lives entirely in static memory (no heap allocations),
+//  is populated by static constructors before setup() and sorted once
+//  in init() (called from Ui::begin()).
 //
-//  Почему линкер не выбрасывает регистрацию: объектники из src/
-//  PlatformIO линкует напрямую (не архивом), а конструкторы лежат в
-//  .init_array, который линкер-скрипты ESP-IDF держат через KEEP.
-//  Проверено сборкой — имя фичи присутствует в firmware.bin.
+//  Why the linker does not drop the registration: object files from
+//  src/ are linked by PlatformIO directly (not as an archive), and the
+//  constructors live in .init_array, which ESP-IDF linker scripts keep
+//  via KEEP. Verified by build — the feature name is present in firmware.bin.
 // =====================================================================
 
-// Имена встроенных категорий. ПОРЯДОК обязан совпадать с enum Section
-// в src/ui/ui.h — индекс сайдбара = индекс категории реестра.
+// Built-in category names. ORDER must match enum Section
+// in src/ui/ui.h — sidebar index = registry category index.
 namespace MwCat {
     constexpr const char* Dashboard = "Dashboard";
     constexpr const char* SubGhz    = "SubGhz";
@@ -36,59 +36,59 @@ namespace MwCat {
 }
 
 constexpr int MW_BUILTIN_CATEGORY_COUNT = 5; // Wifi, SubGhz, Files, Bluetooth, Settings
-constexpr int MW_MAX_NEW_CATEGORIES     = 6;   // новых категорий сайдбара
-constexpr int MW_MAX_FEATURES           = 32;  // всего фич (память: ~28 Б/шт, static)
+constexpr int MW_MAX_NEW_CATEGORIES     = 6;   // new sidebar categories
+constexpr int MW_MAX_FEATURES           = 32;  // total features (memory: ~28 B each, static)
 
-// Явный порядок категорий в сайдбаре (index = позиция сверху).
-// Восстанавливается по имени: builtin'ы и новые категории перемешаны.
+// Explicit category order in the sidebar (index = position from top).
+// Restored by name: built-ins and new categories are interleaved.
 namespace MwOrder {
     // 1 Wi-Fi, 2 SubGHz, 3 RF24, 4 NFC, 5 IR, 6 Ethernet,
-    // 7 Others (между Ethernet и Files — отмечено в отчёте),
+    // 7 Others (between Ethernet and Files — noted in the report),
     // 8 Files, 9 Settings.
 }
 
-// Готовые векторные иконки для НОВЫХ категорий (рисуются в стиле
-// встроенных, см. MwDraw::drawIcon). Для фичи внутри существующей
-// категории иконка не используется — ставь MwIcon::None.
+// Ready-made vector icons for NEW categories (drawn in the style
+// of the built-ins, see MwDraw::drawIcon). For a feature inside an
+// existing category the icon is unused — set MwIcon::None.
 namespace MwIcon {
     enum Id : uint8_t {
         None = 0, Grid, Antenna, Wifi, Folder, Bluetooth, Gear,
         Chip, Terminal, Battery, Pulse, Lock,
-        Nrf, Ethernet, Others
+        Nrf, Ethernet, Others, Screwdriver
     };
 }
 
 struct Feature {
-    const char* name;      // название пункта (коротко, шрифт Font0)
-    const char* category;  // имя категории: MwCat::* или своё ("Tools" и т.п.)
-    uint8_t     icon;      // MwIcon::Id — только для НОВОЙ категории
-    int8_t      order;     // порядок в категории: меньше — раньше; равные — по порядку регистрации
+    const char* name;      // item name (short, Font0 font)
+    const char* category;  // category name: MwCat::* or your own ("Tools" etc.)
+    uint8_t     icon;      // MwIcon::Id — only for a NEW category
+    int8_t      order;     // order within the category: lower = earlier; ties = registration order
 
-    void  (*onEnter)();                                    // вход в функцию (опц.)
-    bool  (*onInput)(const InputState& in);                // ввод; true = событие съедено (опц.)
-    void  (*onTick)();                                     // цикл/обновление — каждый тик loop() (опц.)
-    void  (*onDraw)(LGFX_Sprite& c, int x, int y, int w, int h); // контент карточки (опц.)
-    void  (*onExit)();                                     // выход из функции (опц.)
+    void  (*onEnter)();                                    // feature entry (opt.)
+    bool  (*onInput)(const InputState& in);                // input; true = event consumed (opt.)
+    void  (*onTick)();                                     // loop/update — every tick of loop() (opt.)
+    void  (*onDraw)(LGFX_Sprite& c, int x, int y, int w, int h); // card content (opt.)
+    void  (*onExit)();                                     // feature exit (opt.)
 };
 
-// Валидация + раскладка по категориям. Руками не вызывать — юзай макрос.
+// Validation + layout by category. Do not call by hand — use the macro.
 namespace Features {
     void registerFeature(const Feature& f);
-    void init(); // один раз из Ui::begin(): сортировка, карта категорий, WARN о битых фичах
+    void init(); // once from Ui::begin(): sorting, category map, WARN about broken features
 
-    int         categoryCount();                  // встроенные + новые
+    int         categoryCount();                  // built-in + new
     const char* categoryName(int category);
-    uint8_t     categoryIcon(int category);       // имеет смысл для новых категорий
-    int         categoryOrder(int category);      // позиция в сайдбаре (см. MwOrder)
-    int         featureCount(int category);       // фич-пунктов в категории
+    uint8_t     categoryIcon(int category);       // only meaningful for new categories
+    int         categoryOrder(int category);      // position in the sidebar (see MwOrder)
+    int         featureCount(int category);       // feature items in the category
     const Feature* feature(int category, int item); // item: 0..featureCount-1
 
-    void requestRedraw();      // фича: перерисовать кадр при следующем тике
-    bool takeRedrawRequest();  // Ui: забрать и сбросить флаг
+    void requestRedraw();      // feature: redraw the frame on the next tick
+    bool takeRedrawRequest();  // Ui: take and clear the flag
 }
 
-// Тонкие помощники отрисовки для фич (та же стилистика, что у Ui;
-// Ui::drawCard/drawGauge делегируют сюда — код один, вид одинаковый).
+// Thin drawing helpers for features (same styling as Ui;
+// Ui::drawCard/drawGauge delegate here — one code, identical look).
 namespace MwDraw {
     void card(LGFX_Sprite& c, int x, int y, int w, int h, const char* title);
     void gauge(LGFX_Sprite& c, int cx, int cy, int r, float pct,
@@ -100,9 +100,9 @@ struct FeatureRegistrar {
     explicit FeatureRegistrar(const Feature& f) { Features::registerFeature(f); }
 };
 
-// --- Регистрация функции: один макрос на один .cpp. Неиспользуемые
-//     обработчики передавай как nullptr. Живой пример —
-//     src/features/_template.cpp.example и docs/ADDING_FEATURES.md. ---
+// --- Feature registration: one macro per one .cpp. Pass unused
+//     handlers as nullptr. Live example —
+//     src/features/_template.cpp.example and docs/ADDING_FEATURES.md. ---
 #define MW_REG2_(a, b) a##b
 #define MW_REG_(a, b)  MW_REG2_(a, b)
 #define REGISTER_FEATURE(name_, category_, icon_, order_, enter_, input_, tick_, draw_, exit_) \

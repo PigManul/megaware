@@ -6,6 +6,7 @@
 #include "../radio/subghz.h"
 #include "../net/wifi_manager.h"
 #include "game_io.h"
+#include <esp_system.h>
 #include <SD.h>
 #include <LittleFS.h>
 #include <esp_heap_caps.h>
@@ -261,6 +262,7 @@ namespace {
     jsval_t js_sys_largestBlock(struct js* js, jsval_t* args, int nargs) { return js_mknum((double)MemoryController::largestBlock()); }
     jsval_t js_sys_freePsram(struct js* js, jsval_t* args, int nargs) { return js_mknum((double)ESP.getFreePsram()); }
     jsval_t js_sys_heapLow(struct js* js, jsval_t* args, int nargs) { return js_mknum((double)MemoryController::minFreeHeap()); }
+    jsval_t js_sys_rng(struct js* js, jsval_t* args, int nargs) { return js_mknum((double)(esp_random() & 0x7FFFFFFF)); }
 }
 
 bool JsEngine::begin() { return true; }
@@ -357,6 +359,7 @@ bool JsEngine::runFile(const String& path) {
     js_set(js, sys, "largestBlock", js_mkfun(js_sys_largestBlock));
     js_set(js, sys, "freePsram", js_mkfun(js_sys_freePsram));
     js_set(js, sys, "heapLow", js_mkfun(js_sys_heapLow));
+    js_set(js, sys, "rng", js_mkfun(js_sys_rng));
     js_set(js, global, "sys", sys);
 
     jsval_t fs = js_mkobj(js);

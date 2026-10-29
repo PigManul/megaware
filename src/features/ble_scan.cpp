@@ -1,7 +1,7 @@
 // =====================================================================
-//  Bluetooth: BLE Scan — список устройств поблизости, сортировка по
-//  RSSI, маркер [F] у Apple Find My-трекеров. Клик — новый скан (3 c,
-//  блокирует). Совет: Release Wi-Fi RAM перед сканом (Settings -> Wi-Fi).
+//  Bluetooth: BLE Scan — list of nearby devices, sorted by
+//  RSSI, [F] marker for Apple Find My trackers. Click — a new scan (3 s,
+//  blocking). Tip: release Wi-Fi RAM before scanning (Settings -> Wi-Fi).
 // =====================================================================
 #include "../ui/features.h"
 #include "../hal/blescan.h"
@@ -54,7 +54,7 @@ namespace {
     bool input(const InputState& in) {
         if (in.event == InputEvent::Click) {
             scanned = BleScan::scanBlocking(3);
-            BleScan::deinit(); // результаты в статике — стек выгружаем, heap свободен
+            BleScan::deinit(); // results are kept in static storage — unload the stack, free the heap
             Features::requestRedraw();
             return true;
         }

@@ -1,14 +1,14 @@
 // =====================================================================
-//  Bluetooth: BLE Typer — устройство работает BLE-клавиатурой для твоего
-//  телефона/ПК. Текст: файлы /typers/*.txt (заливаются через WebUI)
-//  ИЛИ набранный вручную на устройстве (hold в списке — композер:
-//  вращение — выбор символа, клик — дописать, hold — backspace,
-//  Quit — отправить набранное).
+//  Bluetooth: BLE Typer — the device acts as a BLE keyboard for your
+//  phone/PC. Text: files /typers/*.txt (uploaded via the WebUI)
+//  OR typed manually on the device (hold in the list — composer:
+//  rotation — character select, click — append, hold — backspace,
+//  Quit — send the typed text).
 //
-//  Надёжность вывода (баг «выдаёт не то»): \r из CRLF-файлов
-//  отбрасывается, \t -> KEY_TAB, не-ASCII байты UTF-8 пропускаются
-//  (HID-клавиатура шлёт раскладочные keycode, юникод ей не передать),
-//  пауза между символами 12 мс.
+//  Output reliability (bug "types the wrong thing"): \r from CRLF files
+//  is dropped, \t -> KEY_TAB, non-ASCII UTF-8 bytes are skipped
+//  (an HID keyboard sends layout keycodes, unicode cannot be passed to it),
+//  12 ms pause between characters.
 // =====================================================================
 #include "../ui/features.h"
 #include "../storage/files.h"
@@ -25,13 +25,13 @@ namespace {
     enum State : uint8_t { List, WaitHost, Typing, Compose };
     State state = List;
     int selIndex = 0;
-    String typeBuf;                // текст к отправке (из файла или композера)
+    String typeBuf;                // text to send (from file or composer)
     size_t typed = 0;
     size_t total = 0;
     char typeName[40] = "";
     char statusMsg[40] = "";
 
-    // композер
+    // composer
     const char* const CHARSET[] = {
         "a","b","c","d","e","f","g","h","i","j","k","l","m","n","o","p","q","r","s","t","u","v","w","x","y","z",
         "A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z",
@@ -44,7 +44,7 @@ namespace {
 
     fs::FS& typerFs() { return Files::sdPresent() ? (fs::FS&)SD : (fs::FS&)LittleFS; }
 
-    // подготовка текста: \r отбрасываем, не-ASCII пропускаем
+    // text preparation: drop \r, skip non-ASCII
     String sanitize(const String& in) {
         String out;
         out.reserve(in.length());
@@ -135,7 +135,7 @@ namespace {
             return;
         }
 
-        // список файлов + подсказка про композер
+        // file list + composer hint
         FsRoot root = Files::sdPresent() ? FsRoot::SD : FsRoot::Flash;
         int n = Files::listCount(root, "/typers");
         int visible = (h - 40) / Theme::ROW_LIST;
@@ -209,7 +209,7 @@ namespace {
 
     void tick() {
         if (state != Typing) return;
-        // ~10 символов за тик (по 12 мс) — хосты не теряют символы
+        // ~10 characters per tick (12 ms each) — hosts don't lose characters
         for (int i = 0; i < 10 && typed < total; i++) {
             char ch = typeBuf[typed];
             if (ch == '\n') kb.write(KEY_RETURN);
@@ -223,7 +223,7 @@ namespace {
             kb.releaseAll();
             state = List;
             snprintf(statusMsg, sizeof(statusMsg), "typed %s", typeName);
-            BLEDevice::deinit(true); // печать окончена — вернуть heap
+            BLEDevice::deinit(true); // typing finished — return the heap
             bleStarted = false;
             Features::requestRedraw();
         }

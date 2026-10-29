@@ -12,20 +12,20 @@
 // =====================================================================
 //  MEGAWARE UI — «Terminal-Lite»
 //
-//  Компоновка: шапка (логотип + статус) / контент / подвал (подсказки).
-//  Навигация — вертикальные списки с курсором «>»:
-//    FocusLevel::Sidebar — главное меню (разделы с иконками),
-//    FocusLevel::SubTab  — список пунктов раздела,
-//    FocusLevel::Field   — строки настроек/списки/браузер,
-//    FocusLevel::Feature — экран фичи (плагин получает контент-прямо-
-//    угольник и рисует сама в той же палитре),
-//    FocusLevel::Modal   — экранная клавиатура / модальные настройки.
+//  Layout: header (logo + status) / content / footer (hints).
+//  Navigation — vertical lists with a ">" cursor:
+//    FocusLevel::Sidebar — main menu (sections with icons),
+//    FocusLevel::SubTab  — list of a section's items,
+//    FocusLevel::Field   — settings rows/lists/browser,
+//    FocusLevel::Feature — feature screen (the plugin gets a content
+//    rectangle and draws itself in the same palette),
+//    FocusLevel::Modal   — on-screen keyboard / modal settings.
 //
-//  Логика ввода и реестр фич не зависят от внешнего вида.
+//  Input logic and the feature registry do not depend on the visuals.
 // =====================================================================
 
-// Разделы главного меню. Отдельного «Dashboard» больше нет — Sleep/Reboot
-// живут в Settings (см. builtinTabName). Индексы = порядок в меню.
+// Main menu sections. A separate "Dashboard" no longer exists — Sleep/Reboot
+// live in Settings (see builtinTabName). Indexes = menu order.
 enum class Section { Wifi, SubGhz, Files, Bluetooth, Settings, COUNT };
 
 enum class FocusLevel { Sidebar, SubTab, Field, Modal, Feature };
@@ -36,7 +36,10 @@ public:
     void begin();
     void tick(const InputState& in);
     void showShutdown();
-    LGFX& rawDisplay() { return display; } // для скриптов (см. src/scripting/game_io.*)
+    LGFX& rawDisplay() { return display; } // for scripts (see src/scripting/game_io.*)
+    bool featureActive() const { return activeFeature != nullptr; } // WebUI: do not touch the hardware while a feature owns it
+    void webSetBrightness(uint8_t v);   // WebUI: apply brightness and save to NVS
+    bool webSetAccentPreset(int idx);   // WebUI: apply the accent preset
 
 private:
     LGFX display;
@@ -47,11 +50,11 @@ private:
     uint32_t bootAt = 0;
     bool timeConfigured = false;
 
-    // --- навигация ---
-    // Категории без пунктов (например, Bluetooth с выключенными фичами)
-    // в списке не показываются. sidebarIndex — позиция в ВИДИМОМ
-    // списке; catOf() переводит её в индекс категории реестра, который
-    // используется в subTabIndex/fieldIndex (память пунктов на категорию).
+    // --- navigation ---
+    // Categories without items (e.g. Bluetooth with its features disabled)
+    // are not shown in the list. sidebarIndex is the position in the VISIBLE
+    // list; catOf() maps it to the registry category index, which is
+    // used by subTabIndex/fieldIndex (per-category item memory).
     int sidebarIndex = 0;
     FocusLevel focusLevel = FocusLevel::Sidebar;
     int visibleCat[MW_BUILTIN_CATEGORY_COUNT + MW_MAX_NEW_CATEGORIES] = {0};
@@ -62,28 +65,28 @@ private:
     uint32_t subTabEnteredAt = 0;
     uint32_t lastKeyAt = 0;
     bool kbShowPlain = false;
-    int  customizeOpen = -1;       // Settings->Customize: -1 список, 0 LED, 1 Display, 2 Theme
+    int  customizeOpen = -1;       // Settings->Customize: -1 list, 0 LED, 1 Display, 2 Theme
     int  netState = -1;
     uint32_t netAt = 0;
     bool netPending = false;
 
-    // --- активная фича (FocusLevel::Feature) ---
+    // --- active feature (FocusLevel::Feature) ---
     const Feature* activeFeature = nullptr;
     int catOf(int pos) const;
     void rebuildVisibleCats();
 
-    // --- настройки LED (много кастомизации: Brightness/R/G/B/Mode/Speed) ---
+    // --- LED settings (lots of customization: Brightness/R/G/B/Mode/Speed) ---
     uint8_t ledBrightness = 90;
     uint8_t ledR = 214, ledG = 24, ledB = 34;
-    int ledModeIdx = 2; // 0=Off 1=Solid 2=Breathing 3=Tail 4=Rainbow — см. LedMode
+    int ledModeIdx = 2; // 0=Off 1=Solid 2=Breathing 3=Tail 4=Rainbow — see LedMode
     uint8_t ledSpeedPct = 100;
-    bool ledEditingRow = false; // вложенная навигация: false=выбор строки, true=редактирование значения
+    bool ledEditingRow = false; // nested navigation: false=row selection, true=editing the value
 
-    // --- настройки Display (Brightness/Auto-dim/Rotation) ---
-    // Дефолты не «на максимум»: подсветка IPS на 100% — главный источник
-    // нагрева экрана. Персистятся в NVS (disp_bright / disp_dim).
+    // --- Display settings (Brightness/Auto-dim/Rotation) ---
+    // Defaults are not "maxed out": IPS backlight at 100% is the main
+    // source of screen heating. Persisted in NVS (disp_bright / disp_dim).
     uint8_t displayBrightness = 180;
-    int displayAutoDimSec = 60;   // 0 = выключено
+    int displayAutoDimSec = 60;   // 0 = disabled
     bool displayFlipped = false;
     bool displayEditingRow = false;
     uint32_t lastActivityMs = 0;
@@ -97,23 +100,23 @@ private:
     // --- Files ---
     String filesPath[2] = {"/", "/"};
     String lastScriptResult;
-    uint32_t lastScriptResultAt = 0; // строка результата гаснет через 4 с
+    uint32_t lastScriptResultAt = 0; // result line fades out after 4 s
 
-    // --- проигрывание аудио из Files (hold на .mp3/.wav) ---
-    // Реализация в ui.cpp (minimp3 + AudioOut I2S). Quit в Files
-    // останавливает воспроизведение, повторный Quit — навигация.
+    // --- audio playback from Files (hold on .mp3/.wav) ---
+    // Implemented in ui.cpp (minimp3 + AudioOut I2S). Quit in Files
+    // stops playback, a second Quit is navigation.
     bool playing = false;
 
-    // --- кастомизация (Settings -> Theme), персистится в NVS ---
-    uint8_t themeAccentIdx = 0; // пресет акцента: 0 Green 1 Amber 2 Cyan 3 White
-    bool footerHints = true;    // показывать подсказки в подвале
+    // --- customization (Settings -> Theme), persisted in NVS ---
+    uint8_t themeAccentIdx = 0; // accent preset: 0 Green 1 Amber 2 Cyan 3 White
+    bool footerHints = true;    // show hints in the footer
 
     // --- Functions (WiFi -> WebUI) ---
     bool webUiEnabled = false;
     int apPresetIdx = 0;
     bool apPresetLoaded = false;
 
-    // --- Modal: экранная QWERTY-клавиатура для пароля Wi-Fi / настройки WebUI ---
+    // --- Modal: on-screen QWERTY keyboard for the Wi-Fi password / WebUI settings ---
     ModalKind modalKind = ModalKind::None;
     String modalTargetSSID;
     String pwBuffer;
@@ -121,10 +124,10 @@ private:
     int kbMode = 0;
     bool kbCaps = false;
 
-    // --- перерисовка по необходимости (см. tick()) ---
-    // Полный кадр — это ~106 КБ по SPI; рисуем только когда что-то
-    // реально изменилось: ввод, сменилось состояние Wi-Fi/скана или
-    // периодика (живые экраны 1 Гц, статичные 1/мин).
+    // --- redraw on demand (see tick()) ---
+    // A full frame is ~106 KB over SPI; draw only when something
+    // actually changed: input, a Wi-Fi/scan state change, or the
+    // periodic tick (live screens 1 Hz, static ones 1/min).
     bool frameMoving = true;
     bool lastFrameAnimated = true;
     WifiConnState lastConnState = WifiConnState::Idle;
@@ -133,44 +136,46 @@ private:
 
     void handleInput(const InputState& in);
     void handleModalInput(const InputState& in);
-    void noteActivity(const InputState& in); // сброс автозатемнения экрана при любой активности
+    void noteActivity(const InputState& in); // reset screen auto-dim on any activity
 
     int  sectionTotal() const;
-    int  builtinTabCount(Section s) const;         // встроенные пункты раздела
+    int  builtinTabCount(Section s) const;         // built-in section items
     const char* builtinTabName(Section s, int i) const;
     bool sectionFieldEditable(Section s) const;
     bool sectionHasTabBar(int sectionIdx) const;
-    int  itemCount(int sectionIdx) const;          // встроенные пункты + фичи
+    int  itemCount(int sectionIdx) const;          // built-in items + features
     const char* itemName(int sectionIdx, int i) const;
     bool itemIsFeature(int sectionIdx, int i) const;
     void enterFeature(const Feature* f);
     void handleFeatureInput(const InputState& in);
     void startPlayback(const String& path);
     void stopPlayback();
-    void tickPlayback(); // кормит I2S/DMA на каждом тике
+    void tickPlayback(); // feeds I2S/DMA on every tick
+    bool flashFirmwareFile(FsRoot root, const String& path); // hold on a .bin in Files
+    void saveLedSettings(); // NVS: the whole Customize > LED screen
 
-    // --- общие элементы Terminal-Lite ---
-    void drawScreen();            // шапка + контент по уровню фокуса + подвал
+    // --- shared Terminal-Lite elements ---
+    void drawScreen();            // header + content per focus level + footer
     void drawSplash();
-    void drawHeader();                              // логотип + wifi/батарея/часы + линия
-    void drawFooter(const char* turn, const char* press, const char* hold); // линия + подсказки
+    void drawHeader();                              // logo + wifi/battery/clock + line
+    void drawFooter(const char* turn, const char* press, const char* hold); // line + hints
     void drawFooterDefault();                       // TURN: select / PRESS: ok / HOLD: back
     void contentRect(int& x, int& y, int& w, int& h);
-    uint8_t iconForSection(int cat) const;          // иконка раздела (MwIcon::Id)
-    const char* sectionDisplayName(int cat) const;  // «Sub-GHz», «Wi-Fi», ...
+    uint8_t iconForSection(int cat) const;          // section icon (MwIcon::Id)
+    const char* sectionDisplayName(int cat) const;  // "Sub-GHz", "Wi-Fi", ...
     void drawScrollbar(int x, int y, int h, int top, int visible, int total);
-    void drawCursor(int x, int y, bool selected);   // «>»
-    void drawKV(int x, int y, int w, const char* key, const char* value, uint16_t valueCol); // «ключ: значение»
+    void drawCursor(int x, int y, bool selected);   // ">"
+    void drawKV(int x, int y, int w, const char* key, const char* value, uint16_t valueCol); // "key: value"
 
-    // --- экраны ---
-    void drawMainMenu();          // список разделов
-    void drawSectionList();       // список пунктов раздела
-    void drawFieldScreen();       // диспетчер строковых экранов по разделу/вкладке
+    // --- screens ---
+    void drawMainMenu();          // list of sections
+    void drawSectionList();       // list of a section's items
+    void drawFieldScreen();       // field-screen dispatcher by section/tab
     void drawLedScreen(int x, int y, int w, int h);
     void drawDisplayScreen(int x, int y, int w, int h);
     void drawTimeScreen(int x, int y, int w, int h);
-    void drawThemeScreen(int x, int y, int w, int h); // акцент/футер — кастомизация
-    void drawAboutScreen(int x, int y, int w, int h); // прокручиваемый key:value
+    void drawThemeScreen(int x, int y, int w, int h); // accent/footer — customization
+    void drawAboutScreen(int x, int y, int w, int h); // scrollable key:value
     int  aboutRowCount() const;
     void drawWifiScreen(int x, int y, int w, int h, int tab); // Connect / WebUI / Network
     void drawFilesScreen(int x, int y, int w, int h);

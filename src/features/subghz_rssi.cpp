@@ -1,6 +1,6 @@
 // =====================================================================
-//  Sub-GHz: Scan — живой RSSI-индикатор эфира.
-//  Мигрирован из Ui::drawSubGhz (tab 1) в реестр фич без изменений вида.
+//  Sub-GHz: Scan — live RSSI indicator of the airwaves.
+//  Migrated from Ui::drawSubGhz (tab 1) into the feature registry with no visual changes.
 // =====================================================================
 #include "../ui/features.h"
 #include "../radio/subghz.h"
@@ -15,7 +15,7 @@ namespace {
         bool ready = SubGhz::isReady();
         float rssi = ready ? SubGhz::readRssiDbm() : -100.0f;
         smoothRssi = smoothRssi * 0.85f + rssi * 0.15f;
-        if (fabsf(rssi - smoothRssi) > 0.5f) Features::requestRedraw(); // был frameMoving
+        if (fabsf(rssi - smoothRssi) > 0.5f) Features::requestRedraw(); // was frameMoving
 
         float pct = constrain((smoothRssi + 100.0f) / 70.0f, 0.0f, 1.0f);
         char buf[16];

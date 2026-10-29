@@ -1,9 +1,9 @@
 #include "../../include/theme.h"
 
 // =====================================================================
-//  Реализация акцентной группы темы: пресеты меняются на лету из
-//  Settings -> Theme и переживают перезагрузку (NVS, см. Ui::begin).
-//  TEXT_DIM выводится из акцента (~45% яркости), OK/ACCENT_* следуют.
+//  Accent theme group implementation: presets are switched on the fly
+//  from Settings -> Theme and survive reboot (NVS, see Ui::begin).
+//  TEXT_DIM is derived from the accent (~45% brightness), OK/ACCENT_* follow.
 // =====================================================================
 
 namespace Theme {

@@ -1,6 +1,6 @@
 # MEGAWARE
 
-Firmware for **LilyGo T-Embed CC1101** (ESP32-S3, ST7789 320×170, CC1101 sub-GHz, PN532 NFC, rotary encoder, WS2812 LEDs) in the style of Flipper Zero: black terminal UI with phosphor-green accent, sidebar-free navigation, Wi-Fi, file manager, Sub-GHz, NFC, IR-ready.
+Firmware for the **LilyGo T-Embed CC1101** (ESP32-S3, 16 MB flash, 8 MB PSRAM). A multi-tool for every radio on this board: sub-GHz (CC1101), NFC (PN532), infrared, BLE, 2.4 GHz (RF24), Ethernet (W5500) — plus Wi-Fi with a built-in web interface, file manager, on-device scripting and firmware updating.
 
 **Tested only on LilyGo T-Embed CC1101.** Other boards listed below are build-configured but untested.
 
@@ -9,14 +9,14 @@ Firmware for **LilyGo T-Embed CC1101** (ESP32-S3, ST7789 320×170, CC1101 sub-GH
 | Category | What it does |
 |---|---|
 | **Wi-Fi** | Connect (scan / WPA / captive DNS), WebUI server, WiFi analyzer, host scanner (TCP /24), HTTP client (presets), mDNS browser, Captive Portal (your page), AP Spam (beacon flood) |
-| **Sub-GHz** | CC1101 status, live RSSI, raw capture / replay / save (.sub Flipper format), spectrum analyzer (RF + WebUI), signal library |
-| **NFC** | PN532 reader (UID / type / ATS), MIFARE Classic dump (default keys + dictionary), Saved dumps (hex editor / write-back / export .nfc .mfd / key map), NDEF write (URL), NTAG password tools |
+| **Sub-GHz** | CC1101 status, live RSSI, raw capture / replay / save (.sub format, Flipper-compatible), spectrum analyzer (RF + WebUI), signal library, decoder |
+| **NFC** | PN532 reader (UID / type / ATS), MIFARE Classic dump (default keys + dictionary), Saved dumps (hex editor / write-back / export .nfc .mfd / key map), NDEF write (URL), NTAG password tools, emulation (UID phase) |
 | **Bluetooth** | BLE scan (RSSI sorted), AirTag / Find My tracker detector, BLE Typer (HID keyboard) |
 | **Ethernet** | W5500 via Grove port (DHCP, WebUI over cable) |
 | **RF24** | 2.4 GHz scanner (external module in Grove port) |
-| **Files** | SD / LittleFS browser, run Lua / JS scripts, MP3 / WAV playback via speaker |
-| **Settings** | LED (color / mode / speed), Display (brightness / rotation), Theme (accent color presets), Time (UTC offset), About (full hardware info), Sleep, Reboot |
-| **WebUI** | File manager (drag & drop, editor, hex editor), Terminal (live status, command console, spectrum display), OTA firmware update, APDU console |
+| **Files** | SD / LittleFS browser, run Lua / JS scripts, MP3 / WAV playback via speaker, flash a `firmware.bin` right from the file list (hold OK) |
+| **Settings** | LED (color / mode / speed / click blip / rotate glow), Display (brightness / auto-dim / rotation), Theme (accent presets), Time (UTC offset, saved), About, Sleep, Reboot |
+| **WebUI** | File manager (drag & drop, editor, hex editor), Terminal (live status, command console with `/docs` reference, spectrum display), APDU console, OTA firmware update |
 | **Scripting** | Lua + JS: `gfx`, `input`, `led`, `subghz`, `nfc`, `wifi`, `battery`, `config`, `fs`, `sys` |
 | **Games** | Snake (Lua + JS examples in `games/`) |
 
@@ -49,9 +49,9 @@ Open `http://megaware.local/` or the device IP in a browser (same network or AP)
 
 - **Files** — SD / Flash manager: browse, create, edit, delete, drag & drop upload, hex editor (≤ 16 KB), download
 - **System Info** — live hardware status
-- **Terminal** — real-time status, command console (`led r g b`, `ping`, `spectrum on/off`, `reboot`), spectrum display, PN532 APDU console
+- **Terminal** — real-time status, command console (type `help` for the full list), spectrum display, PN532 APDU console, [command reference](http://megaware.local/docs)
 - **About** — full hardware info (matches device screen)
-- **UPDATE** — OTA firmware update from browser
+- **OTA UPDATE** — firmware update from the browser over Wi-Fi (not USB)
 
 ## Adding features
 
@@ -84,13 +84,13 @@ Boards without encoders need an input abstraction layer (mapping keyboard / butt
 
 ```
 include/pins.h          — pin map (T-Embed CC1101, verified from Bruce + LilyGo)
-include/theme.h         — Terminal-Lite palette (all colors in one place)
+include/theme.h         — theme palette (all colors in one place)
 src/main.cpp            — init + main loop
 src/hal/                — hardware drivers (board, battery, nfc, ir, blescan, audio_out...)
 src/radio/subghz.*      — CC1101 driver
 src/net/                — WebUI, Wi-Fi manager, resource arbiter, captive portal
 src/storage/files.*     — SD / LittleFS browser
-src/ui/                 — Terminal-Lite UI, feature registry, theme
+src/ui/                 — feature registry, theme, device screens
 src/features/           — feature plugins (one file = one feature)
 src/scripting/          — Lua + JS engines
 games/                  — example scripts (Snake in Lua + JS)

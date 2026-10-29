@@ -2,12 +2,12 @@
 #include <Arduino.h>
 
 // =====================================================================
-//  WebUI — файловый менеджер (SD+LittleFS) с логином, редактированием,
-//  созданием файлов/папок, страницами System Info / Settings / About.
-//  Тёмный неоново-красный дизайн, sidebar-навигация (как в присланном
-//  референсе). HTML отдаётся ПОТОКОВО (server->sendContent() кусками),
-//  а не собирается в одну большую String — так пиковое потребление
-//  памяти на рендер страницы значительно ниже.
+//  WebUI — file manager (SD+LittleFS) with login, file editing,
+//  file/folder creation, and System Info / Settings / About pages.
+//  Dark neon-red design with sidebar navigation (as in the provided
+//  reference). HTML is served STREAMED (server->sendContent() chunks)
+//  instead of being assembled into one big String — peak memory usage
+//  during page rendering is therefore much lower.
 // =====================================================================
 
 namespace WebUI {

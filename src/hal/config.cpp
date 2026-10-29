@@ -4,9 +4,9 @@
 namespace {
     Preferences prefs;
 
-    // Preferences не любит держать begin()/end() открытыми надолго —
-    // открываем/закрываем на каждую операцию. Чуть медленнее, зато не
-    // мешает другим частям кода (WebUI и т.д.), которые тоже лезут в NVS.
+    // Preferences does not like begin()/end() being held open for long —
+    // open/close on every operation. A bit slower, but it does not
+    // interfere with other code (WebUI etc.) that also touches NVS.
     template <typename F>
     auto withPrefs(bool readOnly, F&& fn) -> decltype(fn()) {
         prefs.begin("megaware", readOnly);
@@ -17,9 +17,9 @@ namespace {
 }
 
 void Config::begin() {
-    // NVS сама по себе не требует явной инициализации со стороны
-    // Preferences — оставлено для симметрии API и на случай будущих
-    // миграций схемы настроек.
+    // NVS by itself does not require explicit initialization from
+    // Preferences — kept for API symmetry and in case of future
+    // migrations of the settings schema.
 }
 
 String Config::getString(const char* key, const String& def) {

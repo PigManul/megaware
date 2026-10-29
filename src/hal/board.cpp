@@ -6,7 +6,7 @@
 #define MW_LEDS_ENABLED 1
 
 namespace {
-    // --- табличный half-step квадратурный декодер энкодера (Ben Buxton) ---
+    // --- table-based half-step quadrature encoder decoder (Ben Buxton) ---
     constexpr uint8_t R_START        = 0x0;
     constexpr uint8_t R_CCW_BEGIN    = 0x1;
     constexpr uint8_t R_CW_BEGIN     = 0x2;
@@ -25,7 +25,7 @@ namespace {
         {R_START_M,                      R_CCW_BEGIN_M, R_START_M,   (uint8_t)(R_START | DIR_CCW)},
     };
 
-    constexpr int ENCODER_DIRECTION = -1; // разворот направления под конкретный экземпляр энкодера
+    constexpr int ENCODER_DIRECTION = -1; // direction flip for this particular encoder unit
 
     volatile uint8_t encState = R_START;
     volatile int32_t encAccum = 0;
@@ -52,16 +52,24 @@ namespace {
     uint8_t ledBrightness = 90;
     uint8_t ledSpeedPct = 100;
     LedMode ledMode = LedMode::Breathing;
-    // Off/Solid не меняют данные кадра — show() достаточно одного раза,
-    // а не на каждые 16мс (каждый show — это блокировка на время записи).
+    // Off/Solid do not change the frame data — a single show() is enough,
+    // not one every 16ms (each show blocks for the write duration).
     bool ledOffFlushed = false;
     bool ledSolidFlushed = false;
 
-    // Анимированные режимы (Breathing/Tail): у медленных участков волны
-    // подряд идущие кадры отличаются меньше чем на 3 уровня из 255 —
-    // такой show() визуально ничего не меняет, но блокирует прерывания
-    // на запись (8 LED ≈ 0.6 мс каждые 16 мс). Сравниваем с прошлым
-    // кадром и пишем в светодиоды только реальные изменения.
+    // encoder feedback: blip on click, glow on rotation —
+    // on top of any mode (including Off). markLedDirty() at start is needed
+    // so Off/Solid repaint after the blip instead of staying stuck white.
+    bool ledClickBlip = true;
+    bool ledRotGlow = true;
+    uint32_t blipUntil = 0;
+    uint32_t rotUntil = 0;
+
+    // Animated modes (Breathing/Tail): on slow parts of the wave
+    // consecutive frames differ by less than 3 of 255 levels —
+    // such a show() changes nothing visually but blocks interrupts
+    // during the write (8 LEDs ≈ 0.6 ms every 16 ms). We compare against
+    // the previous frame and write only real changes to the LEDs.
     uint8_t prevLeds[WS2812_NUM_LEDS][3];
     bool ledFrameFlushed = false;
     void markLedDirty() { ledOffFlushed = false; ledSolidFlushed = false; ledFrameFlushed = false; }
@@ -85,8 +93,8 @@ void Board::powerOn() {
     pinMode(PIN_BOARD_PWR_EN, OUTPUT);
     digitalWrite(PIN_BOARD_PWR_EN, HIGH);
 
-    // Поднимаем CS общей SPI-шины (CC1101/SD) в HIGH ДО инициализации
-    // дисплея — иначе плавающий CS может мешать TFT на общей шине.
+    // Raise the shared SPI bus CS lines (CC1101/SD) HIGH BEFORE display
+    // init — otherwise a floating CS may disturb the TFT on the shared bus.
     pinMode(PIN_CC1101_CS, OUTPUT);
     digitalWrite(PIN_CC1101_CS, HIGH);
     pinMode(PIN_SD_CS, OUTPUT);
@@ -175,10 +183,38 @@ void Board::setLedBrightness(uint8_t v) {
 #endif
 }
 
+void Board::setLedClickBlip(bool on) { ledClickBlip = on; if (!on) blipUntil = 0; }
+void Board::setLedRotGlow(bool on)  { ledRotGlow = on; if (!on) rotUntil = 0; }
+bool Board::getLedClickBlip() { return ledClickBlip; }
+bool Board::getLedRotGlow()   { return ledRotGlow; }
+
+void Board::ledBlip() {
+    if (!ledClickBlip) return;
+    blipUntil = millis() + 220;
+    markLedDirty();
+}
+
+void Board::ledRot() {
+    if (!ledRotGlow) return;
+    rotUntil = millis() + 90;
+    markLedDirty();
+}
+
 void Board::updateLeds(uint32_t nowMs) {
 #if MW_LEDS_ENABLED
+    // blip (click) / glow (rotation) override any mode
+    if (nowMs < blipUntil || nowMs < rotUntil) {
+        if (nowMs < blipUntil) {
+            for (int i = 0; i < WS2812_NUM_LEDS; i++) leds[i] = CRGB(255, 255, 255);
+        } else {
+            CRGB glow((uint8_t)(ledR / 2 + 96), (uint8_t)(ledG / 2 + 96), (uint8_t)(ledB / 2 + 96));
+            for (int i = 0; i < WS2812_NUM_LEDS; i++) leds[i] = glow;
+        }
+        flushLedsIfChanged();
+        return;
+    }
     CRGB base(ledR, ledG, ledB);
-    uint32_t t = (uint32_t)((uint64_t)nowMs * ledSpeedPct / 100); // Speed масштабирует "внутреннее" время анимации
+    uint32_t t = (uint32_t)((uint64_t)nowMs * ledSpeedPct / 100); // Speed scales the "internal" animation time
 
     switch (ledMode) {
         case LedMode::Off:
@@ -213,7 +249,7 @@ void Board::updateLeds(uint32_t nowMs) {
                 CHSV hsv((uint8_t)(hueBase + i * (256 / WS2812_NUM_LEDS)), 255, 255);
                 hsv2rgb_rainbow(hsv, leds[i]);
             }
-            flushLedsIfChanged(); // Rainbow меняется каждый кадр — просто не пропустит show()
+            flushLedsIfChanged(); // Rainbow changes every frame — will never skip a show()
             return;
         }
 
@@ -242,10 +278,10 @@ void Board::enterDeepSleep() {
     detachInterrupt(digitalPinToInterrupt(PIN_ENCODER_A));
     detachInterrupt(digitalPinToInterrupt(PIN_ENCODER_B));
 
-    // Пробуждение — по кнопке ЭНКОДЕРА (GPIO0), а НЕ по Quit (GPIO6):
-    // это разные пины, поэтому не нужно ждать отпускания Quit — если бы
-    // пин пробуждения совпадал с зажатой кнопкой, EXT0-wakeup сработал
-    // бы мгновенно (условие уже выполнено на момент входа в сон).
+    // Wakeup is on the ENCODER button (GPIO0), NOT on Quit (GPIO6):
+    // these are different pins, so there is no need to wait for Quit to
+    // be released — if the wakeup pin matched a held-down button, the
+    // EXT0-wakeup would fire instantly (condition already true at sleep entry).
     esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_ENCODER_KEY, 0);
     esp_deep_sleep_start();
 }

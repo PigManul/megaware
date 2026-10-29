@@ -2,34 +2,34 @@
 #include <Arduino.h>
 
 // =====================================================================
-//  ResMgr — арбитр сетевых ресурсов между WebUI и фичами.
+//  ResMgr — arbiter of network resources between WebUI and features.
 //
-//  WebUI — НЕ хозяин портов, а такой же потребитель, как любая фича.
-//  Фича (captive portal, свой HTTP/DNS-сервер, REST) перед работой
-//  захватывает ресурс, по завершении — отпускает:
+//  WebUI is NOT the owner of the ports — it is a consumer just like
+//  any feature. A feature (captive portal, its own HTTP/DNS server,
+//  REST) claims the resource before working and releases it when done:
 //
 //    ResMgr::claim(ResMgr::Resource::Http80, "my_feature");   // onEnter
 //    ResMgr::release(ResMgr::Resource::Http80, "my_feature"); // onExit
 //
-//  WebUI следит за клеймами в WebUI::loop() и сам уходит с дороги
-//  (останавливает свой WebServer/DNSServer) и сам возвращается, когда
-//  ресурс освободился. Пока ресурс клеймен, WebUI::isRunning() честно
-//  сообщает false — «включён, но preempted».
+//  WebUI watches the claims in WebUI::loop() and steps aside on its
+//  own (stops its WebServer/DNSServer) and comes back by itself once
+//  the resource is free. While a resource is claimed, WebUI::isRunning()
+//  honestly reports false — "enabled, but preempted".
 //
-//  Не конфликтуют (арбитраж не нужен): исходящий интернет из фич
-//  (HTTPClient, MQTT, WiFiClient) и сам AP-режим (AP+STA общий).
+//  No conflicts (no arbitration needed): outbound internet from features
+//  (HTTPClient, MQTT, WiFiClient) and AP mode itself (AP+STA is shared).
 // =====================================================================
 
 namespace ResMgr {
     enum class Resource : uint8_t {
-        Http80, // TCP :80 — WebServer WebUI / свой HTTP-сервер фичи
-        Dns53,  // UDP :53 — DNSServer WebUI / свой DNS фичи (captive)
+        Http80, // TCP :80 — WebUI WebServer / feature's own HTTP server
+        Dns53,  // UDP :53 — WebUI DNSServer / feature's own DNS (captive)
     };
 
-    // true — ресурс у тебя (или уже был у тебя). false — занят другой фичей.
+    // true — the resource is yours (or already was). false — held by another feature.
     bool claim(Resource r, const char* owner);
-    // Идемпотентно; с чужим owner — no-op.
+    // Idempotent; with a foreign owner it is a no-op.
     void release(Resource r, const char* owner);
-    // Занят ли кем-то (WebUI по этому флагу уходит с ресурса).
+    // Whether anyone holds it (WebUI steps off the resource on this flag).
     bool isHeld(Resource r);
 }

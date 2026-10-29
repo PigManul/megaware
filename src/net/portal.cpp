@@ -31,6 +31,11 @@ namespace {
         "</body></html>";
 
     void servePage() {
+        // считаем только реальные запросы страницы, не favicon/css
+        if (server->uri() != "/" && server->uri().indexOf(".html") < 0) {
+            server->send(404, "text/plain", "");
+            return;
+        }
         if (pagePath[0]) {
             File f = portalFs().open(pagePath, FILE_READ);
             if (f) {

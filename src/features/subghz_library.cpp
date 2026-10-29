@@ -1,7 +1,7 @@
 // =====================================================================
-//  Sub-GHz: Library — библиотека сохранённых сигналов (/subghz/*.sub,
-//  их пишет Capture). Управление: вращение — выбор, клик — ПЕРЕДАТЬ,
-//  hold OK — удалить. Передача блокирует на время сигнала (1-2 c).
+//  Sub-GHz: Library — library of saved signals (/subghz/*.sub,
+//  written by Capture). Controls: rotation — select, click — TRANSMIT,
+//  hold OK — delete. Transmitting blocks for the duration of the signal (1-2 s).
 // =====================================================================
 #include "../ui/features.h"
 #include "../radio/subghz.h"

@@ -89,8 +89,8 @@ REGISTER_FEATURE("Hello", "Tools", MwIcon::Terminal, 10,
 **Step 2.** Build and flash:
 
 ```bash
-pio run -t upload        # build + flash over COM3 (port set in platformio.ini)
-pio device monitor       # serial log, 115200 (Ctrl+C — exit)
+pio run -t upload        # build + flash (port auto-detected)
+pio device monitor       # serial log, 115200 (Ctrl+C to exit)
 ```
 
 If the board is on a different port: `pio run -t upload --upload-port COM5`.
@@ -240,7 +240,7 @@ Used by the system: 26–32 (flash), 33–37 (OPI PSRAM). Free candidates: 1, 2,
 
 ```bash
 pio run                      # build
-pio run -t upload            # flash (COM3 from platformio.ini)
+pio run -t upload            # flash (port auto-detected)
 pio run -t upload --upload-port COM5
 pio device monitor           # serial 115200
 pio run -t clean             # clean rebuild

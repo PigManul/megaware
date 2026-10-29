@@ -2,9 +2,9 @@
 #include "../../include/theme.h"
 
 // =====================================================================
-//  Реестр функций: статические массивы, сортировка один раз в init().
-//  Всё состояние constant-initialized (POD) — порядок статических
-//  конструкторов между файлами фич не важен (нет static init fiasco).
+//  Feature registry: static arrays, sorted once in init().
+//  All state is constant-initialized (POD) — the order of static
+//  constructors across feature files does not matter (no static init fiasco).
 // =====================================================================
 
 namespace {
@@ -13,35 +13,35 @@ namespace {
     bool         inited = false;
     volatile bool redrawReq = false;
 
-    // После init(): regs отсортирован по (категория, order, регистрация),
-    // catStart[c]..catStart[c+1] — диапазон фич категории c в regs.
+    // After init(): regs is sorted by (category, order, registration),
+    // catStart[c]..catStart[c+1] is the range of category c features in regs.
     int catStart[MW_BUILTIN_CATEGORY_COUNT + MW_MAX_NEW_CATEGORIES + 1];
 
     struct NewCategory {
         const char* name;
         uint8_t     icon;
-        int8_t      bestOrder; // иконку категории даёт фича с меньшим order
+        int8_t      bestOrder; // the feature with the lower order provides the category icon
     };
     NewCategory newCats[MW_MAX_NEW_CATEGORIES];
     int         newCatCount = 0;
 
-    // ПОРЯДОК обязан совпадать с enum Section в ui.h:
+    // ORDER must match enum Section in ui.h:
     // { Wifi, SubGhz, Files, Bluetooth, Settings }
     const char* const builtinNames[MW_BUILTIN_CATEGORY_COUNT] = {
         MwCat::Wifi, MwCat::SubGhz, MwCat::Files,
         MwCat::Bluetooth, MwCat::Settings,
     };
 
-    // Слот категории фичи: 0..5 — встроенная, 6+ — новая (создаётся при
-    // первом появлении), -1 — категория не принимает фичи (Dashboard —
-    // у него нет вкладок, пункты были бы недостижимы).
+    // Feature category slot: 0..5 — built-in, 6+ — new (created on first
+    // appearance), -1 — the category accepts no features (Dashboard —
+    // it has no tabs, its items would be unreachable).
     int categorySlotOf(const Feature& f) {
         if (!f.name || !f.name[0] || !f.category || !f.category[0]) return -1;
         for (int i = 0; i < MW_BUILTIN_CATEGORY_COUNT; i++)
             if (strcmp(f.category, builtinNames[i]) == 0) return i;
         for (int i = 0; i < newCatCount; i++)
             if (strcmp(f.category, newCats[i].name) == 0) {
-                if (f.order < newCats[i].bestOrder) { // иконку даёт самая ранняя фича
+                if (f.order < newCats[i].bestOrder) { // the earliest feature provides the icon
                     newCats[i].icon = f.icon;
                     newCats[i].bestOrder = f.order;
                 }
@@ -65,7 +65,7 @@ void init() {
     if (inited) return;
     inited = true;
 
-    // Раскладка по слотам + отбраковка битых/неприемлемых фич.
+    // Slot layout + rejection of broken/invalid features.
     int slots[MW_MAX_FEATURES];
     int kept = 0;
     for (int i = 0; i < regCount; i++) {
@@ -81,7 +81,7 @@ void init() {
     }
     regCount = kept;
 
-    // Стабильная сортировка вставками по (slot, order, исходный порядок).
+    // Stable insertion sort by (slot, order, original order).
     for (int i = 1; i < regCount; i++) {
         Feature f = regs[i];
         int s = slots[i];
@@ -95,8 +95,8 @@ void init() {
         slots[j + 1] = s;
     }
 
-    // Границы категорий в отсортированном массиве (префиксные суммы —
-    // пустые категории корректно дают featureCount == 0).
+    // Category boundaries in the sorted array (prefix sums —
+    // empty categories correctly yield featureCount == 0).
     int maxSlot = MW_BUILTIN_CATEGORY_COUNT + newCatCount;
     int counts[MW_BUILTIN_CATEGORY_COUNT + MW_MAX_NEW_CATEGORIES];
     for (int c = 0; c < maxSlot; c++) counts[c] = 0;
@@ -107,11 +107,11 @@ void init() {
 
 int categoryCount() { return MW_BUILTIN_CATEGORY_COUNT + newCatCount; }
 
-// Явный порядок сайдбара (MwOrder): builtin'ы и новые перемешаны.
+// Explicit sidebar order (MwOrder): built-ins and new ones interleaved.
 int categoryOrder(int category) {
     static const char* const ORDER[] = {
-        MwCat::Wifi, MwCat::SubGhz, "RF24", "NFC", "IR", "Ethernet", "Others",
-        MwCat::Files, MwCat::Settings,
+        MwCat::Wifi, MwCat::SubGhz, "RF24", "NFC", "IR", "Ethernet",
+        "Tools", "Others", MwCat::Files, MwCat::Settings,
     };
     const char* n = categoryName(category);
     for (int i = 0; i < (int)(sizeof(ORDER) / sizeof(ORDER[0])); i++)
@@ -151,16 +151,16 @@ bool takeRedrawRequest() {
 } // namespace Features
 
 // =====================================================================
-//  MwDraw — помощники отрисовки фич. Стилистика «Terminal-Lite»: чёрный
-//  фон, акцентный заголовок вместо панели, горизонтальная полоса вместо
-//  кругового гейджа. Фичи вызывают card()/gauge() как раньше — вид
-//  меняется централизованно здесь и в include/theme.h.
+//  MwDraw — feature drawing helpers. "Terminal-Lite" styling: black
+//  background, accent title instead of a panel, a horizontal bar instead
+//  of a circular gauge. Features call card()/gauge() as before — the look
+//  changes centrally here and in include/theme.h.
 // =====================================================================
 
 namespace MwDraw {
 
 void card(LGFX_Sprite& c, int x, int y, int w, int h, const char* title) {
-    (void)w; (void)h; // панелей больше нет — только заголовок акцентом
+    (void)w; (void)h; // no more panels — just an accent-colored title
     if (title && title[0]) {
         c.setFont(&fonts::Font0);
         c.setTextSize(Theme::SIZE_TEXT);
@@ -173,7 +173,7 @@ void card(LGFX_Sprite& c, int x, int y, int w, int h, const char* title) {
 void gauge(LGFX_Sprite& c, int cx, int cy, int r, float pct,
            const char* bigText, const char* smallText) {
     pct = constrain(pct, 0.0f, 1.0f);
-    // значение крупно + горизонтальная полоса (r = полуширина полосы)
+    // value shown large + horizontal bar (r = bar half-width)
     c.setFont(&fonts::Font0);
     c.setTextSize(Theme::SIZE_MENU);
     c.setTextDatum(textdatum_t::middle_center);
@@ -189,8 +189,8 @@ void gauge(LGFX_Sprite& c, int cx, int cy, int r, float pct,
     c.drawString(smallText, cx, cy + r + 8);
 }
 
-// Иконки новых категорий сайдбара — простые векторные глифы ~16px,
-// в том же стиле, что встроенные иконки Ui::drawSidebarIcon().
+// Icons of new sidebar categories — simple vector glyphs ~16px,
+// in the same style as the built-in icons of Ui::drawSidebarIcon().
 void drawIcon(LGFX_Sprite& c, uint8_t iconId, int cx, int cy, uint16_t col) {
     switch (iconId) {
         case MwIcon::Grid: {
@@ -244,10 +244,10 @@ void drawIcon(LGFX_Sprite& c, uint8_t iconId, int cx, int cy, uint16_t col) {
             c.drawRoundRect(cx - 7, cy - 7, 14, 14, 2, col);
             c.fillRoundRect(cx - 3, cy - 3, 6, 6, 1, col);
             for (int i = -4; i <= 4; i += 4) {
-                c.fillRect(cx + i - 1, cy - 10, 2, 3, col);  // верх
-                c.fillRect(cx + i - 1, cy + 7, 2, 3, col);   // низ
-                c.fillRect(cx - 10, cy + i - 1, 3, 2, col);  // лево
-                c.fillRect(cx + 7, cy + i - 1, 3, 2, col);   // право
+                c.fillRect(cx + i - 1, cy - 10, 2, 3, col);  // top
+                c.fillRect(cx + i - 1, cy + 7, 2, 3, col);   // bottom
+                c.fillRect(cx - 10, cy + i - 1, 3, 2, col);  // left
+                c.fillRect(cx + 7, cy + i - 1, 3, 2, col);   // right
             }
             break;
         }
@@ -272,7 +272,7 @@ void drawIcon(LGFX_Sprite& c, uint8_t iconId, int cx, int cy, uint16_t col) {
             c.drawLine(cx + 3, cy, cx + 9, cy, col);
             break;
         }
-        case MwIcon::Nrf: { // зигзаг-радио (отличать от антенн SubGhz/Wi-Fi)
+        case MwIcon::Nrf: { // zigzag radio (to distinguish from the SubGhz/Wi-Fi antennas)
             c.drawLine(cx - 8, cy + 5, cx - 3, cy + 5, col);
             c.drawLine(cx - 3, cy + 5, cx, cy - 6, col);
             c.drawLine(cx, cy - 6, cx + 3, cy + 5, col);
@@ -285,7 +285,14 @@ void drawIcon(LGFX_Sprite& c, uint8_t iconId, int cx, int cy, uint16_t col) {
             for (int i = 0; i < 4; i++) c.fillRect(cx - 6 + i * 4, cy - 7, 2, 4, col);
             break;
         }
-        case MwIcon::Others: { // три точки
+        case MwIcon::Screwdriver: { // screwdriver
+            c.drawLine(cx - 2, cy - 8, cx + 4, cy - 2, col);
+            c.drawLine(cx + 2, cy - 8, cx - 4, cy - 2, col);
+            c.drawLine(cx - 4, cy - 2, cx + 2, cy + 6, col);
+            c.fillRect(cx - 1, cy + 4, 6, 5, col);
+            break;
+        }
+        case MwIcon::Others: { // three dots
             c.fillCircle(cx - 6, cy, 2, col);
             c.fillCircle(cx, cy, 2, col);
             c.fillCircle(cx + 6, cy, 2, col);
@@ -298,7 +305,7 @@ void drawIcon(LGFX_Sprite& c, uint8_t iconId, int cx, int cy, uint16_t col) {
             break;
         }
         default:
-            // MwIcon::None — точка-заглушка, чтобы слот сайдбара не был пустым
+            // MwIcon::None — placeholder dot so the sidebar slot is not empty
             c.fillCircle(cx, cy, 3, col);
             break;
     }

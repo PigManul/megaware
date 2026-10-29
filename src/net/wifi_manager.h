@@ -34,8 +34,11 @@ namespace WifiMgr {
     String apIP();
     const char* hostname();
 
-    // Пробует автоподключиться к сети, сохранённой через Config
-    // (см. src/hal/config.h) — вызывай один раз из setup(). Если сеть
-    // не сохранена, радио вообще не трогается (экономия памяти).
+    // Tries to auto-connect to the network saved via Config
+    // (see src/hal/config.h) — call once from setup(). If no network
+    // is saved, the radio is not touched at all (saves memory).
     void tryAutoConnect();
+    // Call from the main loop: retries auto-connect after failures
+    // (the network may not be visible right after the radio comes up).
+    void serviceAutoConnect();
 }

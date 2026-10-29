@@ -2,6 +2,7 @@
 #include <WebServer.h>
 #include <WiFi.h>
 #include <Update.h>
+#include <esp_ota_ops.h>
 #include <SD.h>
 #include <LittleFS.h>
 #include <DNSServer.h>
@@ -15,6 +16,7 @@
 #include "../hal/ir.h"
 #include "../hal/nfc.h"
 #include "../storage/files.h"
+#include "../ui/ui.h"
 
 namespace {
     WebServer* server = nullptr;
@@ -24,6 +26,7 @@ namespace {
 
     void registerRoutes(); // реализация в конце файла, после всех обработчиков
     void handleTerminal();
+    void handleDocs();
     void handleApiStatus();
     void handleApiSpectrum();
     void handleApiCmd();
@@ -64,6 +67,21 @@ namespace {
     }
 
     fs::FS& fsFor(const String& fs) { return fs == "flash" ? (fs::FS&)LittleFS : (fs::FS&)SD; }
+
+    // Ответ /api/cmd собирается вручную: переводы строк и кавычки в out
+    // обязаны уходить экранированными, иначе JSON.parse в браузере падает
+    String jsonEscape(const String& s) {
+        String r;
+        r.reserve(s.length() + 8);
+        for (unsigned int i = 0; i < s.length(); i++) {
+            char c = s[i];
+            if (c == '\n') r += "\\n";
+            else if (c == '\"') r += "\\\"";
+            else if (c == '\\') r += "\\\\";
+            else r += c;
+        }
+        return r;
+    }
 
     bool validFs(const String& fs) { return fs == "sd" || fs == "flash"; }
 
@@ -201,7 +219,7 @@ namespace {
         item("/system", SVG_CHART, "SYSTEM INFO", "system");
         item("/terminal", SVG_CHART, "TERMINAL", "term");
         item("/about", SVG_INFO, "ABOUT", "about");
-        item("/ota", SVG_INFO, "UPDATE", "ota");
+        item("/ota", SVG_INFO, "OTA UPDATE", "ota");
         server->sendContent(
             "<div class='foot'><span class='dot'></span> ESP32 Online</div></div><div class='main'>");
     }
@@ -549,6 +567,7 @@ namespace {
         server->on("/ncsi.txt", HTTP_GET, handleCaptive);
         server->on("/system", HTTP_GET, handleSystem);
         server->on("/terminal", HTTP_GET, handleTerminal);
+        server->on("/docs", HTTP_GET, handleDocs);
         server->on("/api/status", HTTP_GET, handleApiStatus);
         server->on("/api/spectrum", HTTP_GET, handleApiSpectrum);
         server->on("/api/cmd", HTTP_POST, handleApiCmd);
@@ -785,16 +804,21 @@ namespace {
             else { ok = false; out = "usage: ledmode 0..4"; }
         } else if (cmd.startsWith("spectrum ")) {
             String a = cmd.substring(9);
+            a.trim();
+            // "on 2".toInt() молча даёт 0 — все кнопки валились в band 0.
+            // Разбираем on/off явно, число берём после "on".
             if (a.startsWith("off")) { SubGhz::webSpectrum(-1); out = "sweep off"; }
-            else {
-                int band = a.toInt();
+            else if (a.startsWith("on")) {
+                String rest = a.substring(2);
+                rest.trim();
+                int band = rest.toInt();
                 if (band >= 0 && band <= 3) {
                     const static float P[4][3] = {{433.00f, 0.05f, 36}, {868.00f, 0.025f, 25}, {314.00f, 0.05f, 41}, {902.00f, 0.20f, 66}};
                     SubGhz::setSpectrumRange(P[band][0], P[band][1], (int)P[band][2]);
                     SubGhz::webSpectrum(band);
                     out = "sweep on, band " + String(band);
                 } else { ok = false; out = "usage: spectrum on <0..3> | spectrum off"; }
-            }
+            } else { ok = false; out = "usage: spectrum on <0..3> | spectrum off"; }
         } else if (cmd == "ping") {
             out = "pong";
         } else if (cmd.startsWith("ir ")) {
@@ -832,11 +856,164 @@ namespace {
             }
             ok = Ir::sendRaw(hz, t, n);
             out = ok ? "IR raw sent" : "bad raw args";
+        } else if (cmd == "help") {
+            out =
+                "help                  this list\n"
+                "status                heap, psram, battery, wifi, uptime\n"
+                "batt                  battery: voltage, percent, charging\n"
+                "free                  heap: free / min / largest / frag\n"
+                "psram                 PSRAM: size / free\n"
+                "uptime                seconds since boot\n"
+                "version               firmware version\n"
+                "wifi                  connection status\n"
+                "wifi scan             start background scan\n"
+                "wifi connect <ssid> [pass]\n"
+                "wifi off              turn radio off\n"
+                "ls [sd|flash] [dir]   list directory (default: sd /)\n"
+                "cat <sd|flash> <file> print file content\n"
+                "rm <sd|flash> <file>  delete file\n"
+                "bright <10..255>      display backlight\n"
+                "theme <0..3>          accent color preset\n"
+                "led <r> <g> <b>       encoder LED color (solid)\n"
+                "ledmode <0..4>        0 off 1 solid 2 breathing 3 tail 4 rainbow\n"
+                "spectrum on <0..3> | off   CC1101 sweep (graph above)\n"
+                "ir <PROTO> <value> [bits]\n"
+                "irraw <hz> <t1> <t2> ...\n"
+                "ping | reboot\n"
+                "full docs: /docs";
+        } else if (cmd == "status" || cmd == "sysinfo") {
+            char l[200];
+            snprintf(l, sizeof(l),
+                     "fw      %s\n"
+                     "heap    %u KB (min %u KB)\n"
+                     "psram   %u KB\n"
+                     "batt    %d%%%s\n"
+                     "wifi    %s\n"
+                     "uptime  %lu s",
+                     MW_FW_VERSION,
+                     (unsigned)(ESP.getFreeHeap() / 1024),
+                     (unsigned)(MemoryController::minFreeHeap() / 1024),
+                     (unsigned)(ESP.getFreePsram() / 1024),
+                     Battery::percent(), Battery::isCharging() ? " (chg)" : "",
+                     WifiMgr::isConnected() ? WifiMgr::currentSSID().c_str() : "offline",
+                     (unsigned long)(millis() / 1000));
+            out = l;
+        } else if (cmd == "batt") {
+            if (!Battery::isPresent()) out = "no battery (fuel gauge not found)";
+            else out = String("voltage ") + String(Battery::voltage(), 3) + " V, "
+                     + Battery::percent() + "%" + (Battery::isCharging() ? " (charging)" : "");
+        } else if (cmd == "free") {
+            out = String("heap free ") + ESP.getFreeHeap()
+                + " / min " + MemoryController::minFreeHeap()
+                + " / largest " + MemoryController::largestBlock()
+                + " / frag " + MemoryController::fragmentationPct() + "%";
+        } else if (cmd == "psram") {
+            out = String("psram ") + ESP.getPsramSize() + " / free " + ESP.getFreePsram();
+        } else if (cmd == "uptime") {
+            out = String(millis() / 1000) + " s";
+        } else if (cmd == "version") {
+            out = MW_FW_VERSION;
+        } else if (cmd == "wifi" || cmd.startsWith("wifi ")) {
+            String a = cmd == "wifi" ? "" : cmd.substring(5);
+            a.trim();
+            if (a.length() == 0) {
+                if (WifiMgr::isConnected()) {
+                    out = String("connected: ") + WifiMgr::currentSSID()
+                        + ", ip " + WiFi.localIP().toString()
+                        + ", rssi " + WiFi.RSSI() + " dBm";
+                } else if (WifiMgr::isAPRunning()) {
+                    out = String("AP mode, ip ") + WifiMgr::apIP();
+                } else out = "offline";
+            } else if (a == "scan") {
+                WifiMgr::startScan();
+                out = "scan started (results on the Connect page)";
+            } else if (a.startsWith("connect")) {
+                String rest = a.substring(7);
+                rest.trim();
+                int sp = rest.indexOf(' ');
+                String ssid = sp < 0 ? rest : rest.substring(0, sp);
+                String pass = sp < 0 ? "" : rest.substring(sp + 1);
+                if (ssid.length()) { WifiMgr::connect(ssid, pass); out = "connecting to " + ssid; }
+                else { ok = false; out = "usage: wifi connect <ssid> [pass]"; }
+            } else if (a == "off") {
+                WifiMgr::disconnect();
+                WifiMgr::releaseIdleResources();
+                out = "wifi off";
+            } else { ok = false; out = "usage: wifi | wifi scan | wifi connect <ssid> [pass] | wifi off"; }
+        } else if (cmd.startsWith("ls")) {
+            FsRoot root = FsRoot::SD;
+            String p = "/";
+            String rest = cmd.length() > 2 ? cmd.substring(2) : String("");
+            rest.trim();
+            if (rest.length()) {
+                int sp = rest.indexOf(' ');
+                String t0 = sp < 0 ? rest : rest.substring(0, sp);
+                String t1 = sp < 0 ? "" : rest.substring(sp + 1);
+                t1.trim();
+                if (t0 == "flash") { root = FsRoot::Flash; p = t1.length() ? t1 : "/"; }
+                else if (t0 == "sd") { p = t1.length() ? t1 : "/"; }
+                else p = rest;
+            }
+            if (!validPath(p)) { ok = false; out = "bad path"; }
+            else {
+                int n = Files::listCount(root, p);
+                if (n < 0) { ok = false; out = "cannot open dir"; }
+                else {
+                    out = String(p) + " (" + n + " entries)\n";
+                    int shown = n < 40 ? n : 40;
+                    for (int i = 0; i < shown; i++) {
+                        FsEntry e = Files::listEntry(root, p, i);
+                        out += e.isDir ? "[D] " : "    ";
+                        out += e.name;
+                        out += "\n";
+                    }
+                    if (n > shown) out += "... " + String(n - shown) + " more";
+                }
+            }
+        } else if (cmd.startsWith("cat ")) {
+            String rest = cmd.substring(4);
+            rest.trim();
+            int sp = rest.indexOf(' ');
+            String t0 = sp < 0 ? "" : rest.substring(0, sp);
+            String t1 = sp < 0 ? "" : rest.substring(sp + 1);
+            t1.trim();
+            if ((t0 == "sd" || t0 == "flash") && t1.length()) {
+                File f = fsFor(t0).open(t1);
+                if (!f || f.isDirectory()) { ok = false; out = "cannot open " + t1; }
+                else {
+                    out = "";
+                    int lim = 1500;
+                    while (f.available() && lim-- > 0) out += (char)f.read();
+                    f.close();
+                    if (lim <= 0) out += "\n... (truncated)";
+                }
+            } else { ok = false; out = "usage: cat <sd|flash> <file>"; }
+        } else if (cmd.startsWith("rm ")) {
+            String rest = cmd.substring(3);
+            rest.trim();
+            int sp = rest.indexOf(' ');
+            String t0 = sp < 0 ? "" : rest.substring(0, sp);
+            String t1 = sp < 0 ? "" : rest.substring(sp + 1);
+            t1.trim();
+            if ((t0 == "sd" || t0 == "flash") && validPath(t1)) {
+                bool done = fsFor(t0).remove(t1);
+                Files::invalidateCache();
+                ok = done;
+                out = done ? "removed " + t1 : "remove failed";
+            } else { ok = false; out = "usage: rm <sd|flash> <file>"; }
+        } else if (cmd.startsWith("bright ")) {
+            int v = cmd.substring(7).toInt();
+            if (v >= 10 && v <= 255) { ui.webSetBrightness((uint8_t)v); out = "brightness " + String(v); }
+            else { ok = false; out = "usage: bright <10..255>"; }
+        } else if (cmd.startsWith("theme ")) {
+            int v = cmd.substring(6).toInt();
+            if (ui.webSetAccentPreset(v)) out = "theme preset " + String(v);
+            else { ok = false; out = "usage: theme <0..3>"; }
         } else {
             ok = false;
-            out = "unknown cmd (reboot | led r g b | ledmode n | spectrum on 0..3 | off | ping)";
+            out = "unknown cmd - type 'help' (full docs: /docs)";
         }
-        String j = String("{\"ok\":") + (ok ? "true" : "false") + ",\"out\":\"" + out + "\"}";
+        String j = String("{\"ok\":") + (ok ? "true" : "false") + ",\"out\":\"" + jsonEscape(out) + "\"}";
         server->send(200, "application/json", j);
     }
 
@@ -852,10 +1029,11 @@ namespace {
             "<button class='btn' onclick=\"cmd('spectrum on 2')\">Sweep 315</button>"
             "<button class='btn' onclick=\"cmd('spectrum on 3')\">Sweep 915</button>"
             "<button class='btn' onclick=\"cmd('spectrum off')\">Sweep OFF</button>"
-            "<button class='btn' onclick=\"cmd('reboot')\">Reboot</button></div>"
+            "<button class='btn' onclick=\"cmd('reboot')\">Reboot</button>"
+            "<button class='btn' onclick=\"location.href='/docs'\">Command reference</button></div>"
             "<canvas id='spec' width='640' height='200' style='width:100%;background:#000;border:1px solid #1a733d;margin-top:10px'></canvas>"
             "<form class='row' style='margin-top:14px' onsubmit='return doCmd()'>"
-            "<input type='text' id='ci' placeholder='command: led 20 200 80 | ping | ...' style='flex:1'>"
+            "<input type='text' id='ci' placeholder=\"type 'help' for the command list\" style='flex:1'>"
             "<button class='btn' type='submit'>Send</button></form>"
             "<h3 style='color:#39ff88'>PN532 APDU</h3>"
             "<form class='row' onsubmit='return doApdu()'>"
@@ -937,37 +1115,148 @@ namespace {
     }
 
     // =================================================================
+    //  Docs: полный справочник команд терминала (English)
+    // =================================================================
+    void handleDocs() {
+        sendHead("MEGAWARE // Docs");
+        sendSidebar("term");
+        sendTopbar("terminal command reference");
+        server->sendContent(
+            "<div class='pill' style='display:block'>Open the <a href='/terminal' style='color:#39ff88'>Terminal</a> "
+            "and type a command below. Every command replies with a JSON status; the terminal prints "
+            "the <b>out</b> field. Type <b>help</b> anytime for the short list.</div>"
+            "<h3 style='color:#39ff88'>System</h3>"
+            "<table>"
+            "<tr><td><b>help</b></td><td>Print the full command list.</td></tr>"
+            "<tr><td><b>status</b> / <b>sysinfo</b></td><td>Firmware version, heap (current/minimum), PSRAM, battery percent, Wi-Fi state, uptime.</td></tr>"
+            "<tr><td><b>free</b></td><td>Heap details: free, minimum watermark, largest free block, fragmentation %.</td></tr>"
+            "<tr><td><b>psram</b></td><td>PSRAM size and free bytes.</td></tr>"
+            "<tr><td><b>batt</b></td><td>Battery voltage, percent and charging flag (BQ27220 fuel gauge).</td></tr>"
+            "<tr><td><b>uptime</b></td><td>Seconds since boot.</td></tr>"
+            "<tr><td><b>version</b></td><td>Firmware version string.</td></tr>"
+            "<tr><td><b>ping</b></td><td>Health check, replies <i>pong</i>.</td></tr>"
+            "<tr><td><b>reboot</b></td><td>Restart the device immediately.</td></tr>"
+            "</table>"
+            "<h3 style='color:#39ff88'>Files (sd | flash)</h3>"
+            "<div class='pill' style='display:block'>Most file commands accept an optional filesystem prefix: "
+            "<b>sd</b> (SD card) or <b>flash</b> (internal LittleFS). Default is <b>sd</b>.</div>"
+            "<table>"
+            "<tr><td><b>ls</b> [sd|flash] [dir]</td><td>List a directory. Examples: <i>ls</i>, <i>ls flash /</i>, <i>ls /subghz</i>. Dirs are marked [D], 40 entries max per reply.</td></tr>"
+            "<tr><td><b>cat</b> &lt;sd|flash&gt; &lt;file&gt;</td><td>Print a text file (first 1500 bytes). Example: <i>cat flash /rfid/keys.txt</i></td></tr>"
+            "<tr><td><b>rm</b> &lt;sd|flash&gt; &lt;file&gt;</td><td>Delete a file. This cannot be undone. Example: <i>rm sd /ir/tv.sub</i></td></tr>"
+            "</table>"
+            "<h3 style='color:#39ff88'>Wi-Fi</h3>"
+            "<table>"
+            "<tr><td><b>wifi</b></td><td>Connection status: SSID, IP, RSSI — or AP mode info.</td></tr>"
+            "<tr><td><b>wifi scan</b></td><td>Start a background scan; results appear on the Connect page of the WebUI.</td></tr>"
+            "<tr><td><b>wifi connect</b> &lt;ssid&gt; [pass]</td><td>Join a network. On success the credentials are saved and used for auto-connect at boot. Example: <i>wifi connect Home s3cretpass</i></td></tr>"
+            "<tr><td><b>wifi off</b></td><td>Disconnect and power the radio down (frees RAM).</td></tr>"
+            "</table>"
+            "<h3 style='color:#39ff88'>Display & LED</h3>"
+            "<table>"
+            "<tr><td><b>bright</b> &lt;10..255&gt;</td><td>Set display backlight now and persist it to NVS.</td></tr>"
+            "<tr><td><b>theme</b> &lt;0..3&gt;</td><td>Accent color preset: 0 Green, 1 Amber, 2 Cyan, 3 White. Persisted.</td></tr>"
+            "<tr><td><b>led</b> &lt;r&gt; &lt;g&gt; &lt;b&gt;</td><td>Encoder LED color, switches mode to Solid. Example: <i>led 20 200 80</i></td></tr>"
+            "<tr><td><b>ledmode</b> &lt;0..4&gt;</td><td>0 Off, 1 Solid, 2 Breathing, 3 Tail, 4 Rainbow.</td></tr>"
+            "</table>"
+            "<div class='pill' style='display:block'>On-device LED customization (including <b>Click blip</b> and "
+            "<b>Rotate glow</b> encoder feedback) lives in <i>Settings → Customize → LED</i> on the device itself.</div>"
+            "<h3 style='color:#39ff88'>SubGHz sweep</h3>"
+            "<table>"
+            "<tr><td><b>spectrum on</b> &lt;0..3&gt;</td><td>Start CC1101 RF sweep for the graph above. Bands: 0 = 433 MHz, 1 = 868 MHz, 2 = 315 MHz, 3 = 915 MHz.</td></tr>"
+            "<tr><td><b>spectrum off</b></td><td>Stop the sweep and release the radio.</td></tr>"
+            "</table>"
+            "<div class='pill' style='display:block'>The sweep only runs while no device feature owns the CC1101. "
+            "The buttons above send exactly these commands.</div>"
+            "<h3 style='color:#39ff88'>IR</h3>"
+            "<table>"
+            "<tr><td><b>ir</b> &lt;PROTO&gt; &lt;value&gt; [bits]</td><td>Send an infrared code. Protocols: NEC, SONY, RC5, RC6, SAMSUNG, LG, JVC, PANASONIC. "
+            "Value accepts decimal or 0x-hex. Example: <i>ir NEC 0x1FE807F</i></td></tr>"
+            "<tr><td><b>irraw</b> &lt;hz&gt; &lt;t1&gt; &lt;t2&gt; ...</td><td>Send raw IR timings in microseconds (sign is ignored). Example: <i>irraw 38000 9000 -4500 550 -550</i></td></tr>"
+            "</table>"
+            "<h3 style='color:#39ff88'>Flashing the firmware</h3>"
+            "<table>"
+            "<tr><td><b>OTA over Wi-Fi</b></td><td>The <i>OTA UPDATE</i> page on this site (button there says "
+            "\"Flash over OTA\"). Uploads <i>firmware.bin</i> from the browser into the second app slot — "
+            "the file must fit 3 MB. USB cable not involved.</td></tr>"
+            "<tr><td><b>USB cable</b></td><td><code>pio run -t upload</code> from the project folder "
+            "(PlatformIO). Full reflash including the partition table — any size. "
+            "See <i>docs/FLASHING.md</i> in the repository.</td></tr>"
+            "<tr><td><b>On-device from file</b></td><td>Put <i>firmware.bin</i> on the SD card or flash storage "
+            "(drag &amp; drop on the FILES page), then on the device open <i>Files</i>, navigate to the file and "
+            "<b>hold OK</b> on it. The device verifies the size, flashes the second slot and reboots.</td></tr>"
+            "</table>"
+            "<div class='pill' style='display:block'>Do not confuse the three: OTA = browser over Wi-Fi, "
+            "USB = PlatformIO over cable, on-device = hold OK on a .bin in Files.</div>");
+        sendFoot();
+    }
+
+    // =================================================================
     //  OTA: обновление прошивки файлом .bin прямо из браузера
     // =================================================================
     void handleOtaGet() {
-        sendHead("MEGAWARE // Update");
+        sendHead("MEGAWARE // OTA update");
         sendSidebar("ota");
-        sendTopbar("firmware update");
+        sendTopbar("ota firmware update");
         server->sendContent(
-            "<div class='pill' style='display:block'>Upload your .bin firmware (PlatformIO: "
-            ".pio/build/t-embed-cc1101/firmware.bin). The device verifies the image "
-            "and reboots automatically. Current version: " MW_FW_VERSION "</div>"
+            "<div class='pill' style='display:block'>This page is <b>OTA over Wi-Fi</b>: the .bin is uploaded "
+            "from your browser into the second app slot (max 3 MB). <b>It is not USB flashing.</b> "
+            "The device verifies the image and reboots automatically. Current version: " MW_FW_VERSION "</div>"
+            "<div class='pill' style='display:block;margin-top:8px'>Three ways to flash firmware:</div>"
+            "<table style='margin-top:8px'>"
+            "<tr><td><b>OTA</b> (this page)</td><td>Upload <i>firmware.bin</i> from the browser over Wi-Fi. "
+            "File must fit the OTA slot (3 MB) — use <i>.pio/build/t-embed-cc1101/firmware.bin</i>.</td></tr>"
+            "<tr><td><b>USB cable</b></td><td>PlatformIO: <code>pio run -t upload</code>. Full reflash, "
+            "any size — see <i>docs/FLASHING.md</i>.</td></tr>"
+            "<tr><td><b>On-device</b></td><td>Copy <i>firmware.bin</i> to SD or flash storage, open "
+            "<i>Files</i> on the device, hold OK on the file.</td></tr>"
+            "</table>"
             "<form method='POST' action='/ota' enctype='multipart/form-data' style='margin-top:16px'>"
             "<input type='file' name='firmware' accept='.bin' required> "
-            "<button class='btn' type='submit'>Flash</button></form>");
+            "<button class='btn' type='submit'>Flash over OTA</button></form>");
         sendFoot();
     }
+
+    char otaErr[160] = "";
 
     void handleOtaUpload() {
         HTTPUpload& up = server->upload();
         if (up.status == UPLOAD_FILE_START) {
-            Update.begin(UPDATE_SIZE_UNKNOWN);
+            otaErr[0] = 0;
+            const esp_partition_t* running = esp_ota_get_running_partition();
+            const esp_partition_t* next = esp_ota_get_next_update_partition(running);
+            if (!next) {
+                // на чипе нет app0/app1 (старая однораздельная таблица)
+                snprintf(otaErr, sizeof(otaErr),
+                         "No OTA partition on chip. Reflash via USB cable once — then OTA works.");
+                return;
+            }
+            if (!Update.begin(next->size, U_FLASH)) {
+                snprintf(otaErr, sizeof(otaErr), "Begin failed: %s", Update.errorString());
+            }
         } else if (up.status == UPLOAD_FILE_WRITE) {
-            Update.write(up.buf, up.currentSize);
+            if (Update.isRunning() && !otaErr[0]) {
+                size_t w = Update.write(up.buf, up.currentSize);
+                if (w != up.currentSize && !otaErr[0]) {
+                    snprintf(otaErr, sizeof(otaErr), "Write failed: %s", Update.errorString());
+                }
+            }
         } else if (up.status == UPLOAD_FILE_END) {
-            Update.end(true);
+            if (Update.isRunning() && !Update.end(true) && !otaErr[0]) {
+                snprintf(otaErr, sizeof(otaErr), "Verify failed: %s", Update.errorString());
+            }
+        } else if (up.status == UPLOAD_FILE_ABORTED) {
+            if (Update.isRunning()) Update.end();
+            snprintf(otaErr, sizeof(otaErr), "Upload aborted.");
         }
     }
 
     void handleOtaPost() {
-        if (Update.hasError()) {
-            server->send(500, "text/plain", String("OTA failed: ") + Update.errorString() + " (это не firmware.bin?)");
-            Update.end();
+        if (otaErr[0] || Update.hasError()) {
+            String msg = otaErr[0] ? String(otaErr) : String("OTA failed: ") + Update.errorString();
+            server->send(500, "text/plain", msg);
+            otaErr[0] = 0;
+            if (Update.isRunning()) Update.end();
             return;
         }
         server->send(200, "text/plain", "OK — firmware accepted, rebooting...");
@@ -1008,4 +1297,13 @@ void WebUI::loop() {
 
     if (dns) dns->processNextRequest();
     if (server) server->handleClient();
+
+    // Веб-sweep: пока веб просит диапазон и на устройстве не запущена своя
+    // SubGhz-фича — сами крутим CC1101. Раньше никто не вызывал sweepOnce(),
+    // /api/spectrum вечно отдавал устаревшие данные и график не «жил».
+    if (SubGhz::webSpectrumActive() && !ui.featureActive()) {
+        static uint32_t lastSweep = 0;
+        uint32_t now = millis();
+        if (now - lastSweep >= 60) { lastSweep = now; SubGhz::sweepOnce(); }
+    }
 }

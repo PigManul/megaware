@@ -1,8 +1,8 @@
 // =====================================================================
-//  Sub-GHz: Spectrum — спектроанализатор эфира. Вращение переключает
-//  диапазон-пресет (433 / 868 / 315 / 915). Пока фича открыта, идёт
-//  непрерывная развёртка (~50 мс на проход); данные live-текут и в
-//  WebUI: /terminal рисует их в реальном времени (/api/spectrum).
+//  Sub-GHz: Spectrum — RF spectrum analyzer. Rotation switches the
+//  band preset (433 / 868 / 315 / 915). While the feature is open a
+//  continuous sweep runs (~50 ms per pass); the data also streams
+//  live into the WebUI: /terminal draws it in real time (/api/spectrum).
 // =====================================================================
 #include "../ui/features.h"
 #include "../radio/subghz.h"
@@ -45,7 +45,7 @@ namespace {
         int baseY = y0 + h - 18;
         int bw = (w - 8) / s.count;
         if (bw < 2) bw = 2;
-        // шкала: -100..-40 дБм -> высота
+        // scale: -100..-40 dBm -> height
         c.setTextDatum(textdatum_t::middle_center);
         float peak = -999;
         int pi = 0;
@@ -79,7 +79,7 @@ namespace {
     }
 
     void tick() {
-        // развёртка не чаще раза в 60 мс — радио не душит остальное
+        // sweep at most once per 60 ms — the radio must not starve the rest
         if (millis() - lastSweep >= 60) {
             lastSweep = millis();
             SubGhz::sweepOnce();
@@ -93,7 +93,7 @@ namespace {
     }
 
     void onExit() {
-        // вернуть радио на «пользовательскую» частоту
+        // return the radio to the "user" frequency
         SubGhz::setFrequency(SubGhz::currentFrequencyMHz());
     }
 }
