@@ -37,7 +37,7 @@ namespace MwCat {
 
 constexpr int MW_BUILTIN_CATEGORY_COUNT = 5; // Wifi, SubGhz, Files, Bluetooth, Settings
 constexpr int MW_MAX_NEW_CATEGORIES     = 6;   // new sidebar categories
-constexpr int MW_MAX_FEATURES           = 32;  // total features (memory: ~28 B each, static)
+constexpr int MW_MAX_FEATURES           = 48;  // total features (memory: ~28 B each, static)
 
 // Explicit category order in the sidebar (index = position from top).
 // Restored by name: built-ins and new categories are interleaved.
