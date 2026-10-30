@@ -70,6 +70,7 @@ namespace {
         File f = typerFs().open(path, FILE_READ);
         if (!f) { snprintf(statusMsg, sizeof(statusMsg), "open failed"); return; }
         String text;
+        text.reserve(f.size()); // one allocation instead of per-byte growth
         while (f.available()) text += (char)f.read();
         f.close();
         typeBuf = sanitize(text);
@@ -124,8 +125,8 @@ namespace {
                          x0 + w / 2, y0 + 52);
             c.setFont(&fonts::Font0);
             c.setTextSize(Theme::SIZE_TEXT);
-            String tail = composeBuf;
-            if (tail.length() > 34) tail = tail.substring(tail.length() - 34);
+            const char* tail = composeBuf.c_str(); // no String copy per frame
+            if (composeBuf.length() > 34) tail += composeBuf.length() - 34;
             c.setTextDatum(textdatum_t::middle_left);
             c.setTextColor(Theme::TEXT_DIM, Theme::BG);
             c.drawString(tail, x0 + 10, y0 + 88);

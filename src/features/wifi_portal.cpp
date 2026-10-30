@@ -48,7 +48,9 @@ namespace {
             c.setTextColor(Theme::OK, Theme::BG);
             c.drawString("RUNNING", x0 + 10, y0 + 24);
             c.setTextColor(Theme::TEXT_DIM, Theme::BG);
-            c.drawString("AP: MEGAWARE  " + WifiMgr::apIP(), x0 + 10, y0 + 42);
+            char apLine[48];
+            snprintf(apLine, sizeof(apLine), "AP: MEGAWARE  %s", WifiMgr::apIP().c_str()); // no String per frame
+            c.drawString(apLine, x0 + 10, y0 + 42);
             char line[48];
             snprintf(line, sizeof(line), "page: %s", Portal::pageName());
             c.drawString(line, x0 + 10, y0 + 58);

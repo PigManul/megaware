@@ -70,10 +70,12 @@ namespace {
             c.setTextColor(Theme::TEXT_DIM, Theme::BG);
             c.drawString("passive capture to SD, pcap format", x0 + 10, y0 + 24);
             c.setTextColor(Theme::ACCENT, Theme::BG);
-            c.drawString("click: start (ch " + String(channel) + ")", x0 + 10, y0 + 44);
+            snprintf(line, sizeof(line), "click: start (ch %u)", (unsigned)channel); // no String per frame
+            c.drawString(line, x0 + 10, y0 + 44);
         } else {
             c.setTextColor(Theme::OK, Theme::BG);
-            c.drawString("RECORDING  ch " + String(channel) + "  " + String(pps) + " pkt/s", x0 + 10, y0 + 24);
+            snprintf(line, sizeof(line), "RECORDING  ch %u  %lu pkt/s", (unsigned)channel, (unsigned long)pps);
+            c.drawString(line, x0 + 10, y0 + 24);
             c.setTextColor(Theme::TEXT, Theme::BG);
             snprintf(line, sizeof(line), "frames %lu", (unsigned long)PcapLogger::frames());
             c.drawString(line, x0 + 10, y0 + 44);

@@ -44,6 +44,7 @@ namespace {
         tag = t;
         isClassic = t.isClassic;
         totalUnits = t.isClassic ? t.blocks : t.pages;
+        if (totalUnits > 256) totalUnits = 256; // blockOk[] has 256 slots
         doneUnits = 0;
         viewOffset = 0;
         memset(blockOk, 0, sizeof(blockOk));
@@ -78,6 +79,8 @@ namespace {
                     if (blockOk[u]) Nfc::lastAuthKey(sectorKey[sector]);
                 }
                 int sectors = totalUnits / 4;
+                if (totalUnits > 128) sectors = 32 + (totalUnits - 128) / 16; // 4K: 8 large sectors
+                if (sectors > 40) sectors = 40; // sectorKey holds 40 — never over-read
                 kf.write((uint8_t*)sectorKey, sectors * 6);
                 kf.close();
             }

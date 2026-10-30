@@ -92,6 +92,7 @@ namespace {
         }
         if (!EthW5500::start()) {
             strncpy(statusMsg, EthW5500::lastError(), sizeof(statusMsg) - 1);
+            statusMsg[sizeof(statusMsg) - 1] = 0; // strncpy does not terminate on truncation
             return false;
         }
         // static address on the cable side + DHCP server for the clients
@@ -187,8 +188,10 @@ namespace {
             return;
         }
 
+        char upLine[64];
+        snprintf(upLine, sizeof(upLine), "UP  %s", WifiMgr::currentSSID().c_str()); // no String per frame
         c.setTextColor(Theme::OK, Theme::BG);
-        c.drawString("UP  " + WifiMgr::currentSSID(), x0 + 10, y0 + 22);
+        c.drawString(upLine, x0 + 10, y0 + 22);
         c.setTextColor(Theme::TEXT, Theme::BG);
         c.drawString("LAN 192.168.169.1 (DHCP on)", x0 + 10, y0 + 36);
 

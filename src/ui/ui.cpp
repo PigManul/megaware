@@ -103,14 +103,12 @@ namespace {
             if ((c0 & 0xF8) == 0xF0) { out[o++] = '?'; i += 4; continue; }
             i++;
         }
+        if (o >= n) o = n - 1; // two-char writes (YO/yo) can reach n — clamp before the NUL
         out[o] = 0;
     }
 
-    String translitCyrillic(const String& in) {
-        char buf[96];
-        translitToBuf(in, buf, sizeof(buf));
-        return String(buf);
-    }
+    // (translitCyrillic helper removed — the keyboard title now
+    // transliterates straight into a buffer, no String per redraw)
 
     // List/settings row: "> label ..... value" (value on the right).
     void drawListRow(LGFX_Sprite& c, int x, int y, int w, bool selected, bool editing,
@@ -1128,6 +1126,8 @@ void Ui::handleFeatureInput(const InputState& in) {
 // =====================================================================
 void Ui::handleModalInput(const InputState& in) {
     if (modalKind != ModalKind::WifiPassword) { focusLevel = FocusLevel::Field; modalKind = ModalKind::None; return; }
+    // guard: without input there is nothing to do — saves a String per tick
+    if (in.event == InputEvent::None && in.rotationSteps == 0) return;
 
     const int* rowLen = kbMode == 0 ? kb::lettersRowLen : kb::symsRowLen;
     int totalGridKeys = rowLen[0] + rowLen[1] + rowLen[2];
@@ -1687,7 +1687,9 @@ void Ui::drawWifiScreen(int x0, int y0, int w, int h, int tab) {
         // status
         static char sbuf[64];
         if (WifiMgr::isConnected()) {
-            snprintf(sbuf, sizeof(sbuf), "Wi-Fi: %s", translitCyrillic(WifiMgr::currentSSID()).c_str());
+            char tbuf[48];
+            translitToBuf(WifiMgr::currentSSID(), tbuf, sizeof(tbuf)); // no String: drawn on every state change
+            snprintf(sbuf, sizeof(sbuf), "Wi-Fi: %s", tbuf);
             canvas.setTextColor(Theme::OK, Theme::BG);
             canvas.drawString(sbuf, x0 + 12, listTop + 6);
         } else if (WifiMgr::connState() == WifiConnState::Connecting) {
@@ -1750,7 +1752,9 @@ void Ui::drawFilesScreen(int x0, int y0, int w, int h) {
         canvas.setTextColor(Theme::TEXT_DIM, Theme::BG);
         if (webUiEnabled) {
             if (WifiMgr::isConnected()) {
-                canvas.drawString("http://" + WiFi.localIP().toString() + "/", x0 + 12, y0 + 62);
+                char url[40];
+                snprintf(url, sizeof(url), "http://%s/", WiFi.localIP().toString().c_str());
+                canvas.drawString(url, x0 + 12, y0 + 62);
             } else if (WifiMgr::isAPRunning()) {
                 canvas.drawString("AP: 192.168.4.1", x0 + 12, y0 + 62);
             }
@@ -1824,10 +1828,17 @@ void Ui::drawModalWifiKeyboard() {
     canvas.setTextSize(Theme::SIZE_TEXT);
     canvas.setTextDatum(textdatum_t::top_center);
     canvas.setTextColor(Theme::ACCENT, Theme::BG);
-    String ssidTitle = translitCyrillic(modalTargetSSID);
+    char ssidTitle[96];
+    translitToBuf(modalTargetSSID, ssidTitle, sizeof(ssidTitle)); // no String per redraw
     if (canvas.textWidth(ssidTitle) > 250) {
-        while (ssidTitle.length() > 1 && canvas.textWidth(ssidTitle + "...") > 250) ssidTitle.remove(ssidTitle.length() - 1);
-        ssidTitle += "...";
+        // truncate the title part, "..." stays at the end
+        size_t len = strlen(ssidTitle);
+        if (len > sizeof(ssidTitle) - 4) len = sizeof(ssidTitle) - 4;
+        strcpy(ssidTitle + len, "...");
+        while (len > 0 && canvas.textWidth(ssidTitle) > 250) {
+            memmove(ssidTitle + len - 1, ssidTitle + len, 4); // shift left, keep "..."
+            len--;
+        }
     }
     canvas.drawString(ssidTitle, Theme::SCREEN_W / 2, 2);
     if (kbCaps) {
@@ -1853,14 +1864,16 @@ void Ui::drawModalWifiKeyboard() {
         for (uint32_t i = 0; i < pwBuffer.length(); i++) shown += '*';
     }
     if (canvas.textWidth(shown) > 250) {
-        while (shown.length() > 1 && canvas.textWidth("..." + shown) > 250) shown.remove(0, 1);
-        shown = "..." + shown;
+        shown = "..." + shown; // truncate the content part, "..." stays at the front
+        while (shown.length() > 4 && canvas.textWidth(shown) > 250) shown.remove(1, 1);
     }
     canvas.drawString(shown, 26, 25);
     canvas.drawFastHLine(20, 34, 280, Theme::TEXT_DIM);
     canvas.setTextDatum(textdatum_t::middle_right);
     canvas.setTextColor(Theme::TEXT_DIM, Theme::BG);
-    canvas.drawString(String(pwBuffer.length()), 296, 25);
+    char pwCount[8];
+    snprintf(pwCount, sizeof(pwCount), "%u", (unsigned)pwBuffer.length());
+    canvas.drawString(pwCount, 296, 25);
 
     const int* rowLen = kbMode == 0 ? kb::lettersRowLen : kb::symsRowLen;
     const char* const* funcRow = kbMode == 0 ? kb::funcRowLetters : kb::funcRowSyms;
@@ -1885,8 +1898,9 @@ void Ui::drawModalWifiKeyboard() {
             } else {
                 canvas.setTextColor(isShift && kbCaps ? Theme::ACCENT : Theme::TEXT_DIM, Theme::BG);
             }
-            String lbl = rawLabel;
-            if (kbMode == 0 && kbCaps && lbl.length() == 1 && isalpha((int)lbl[0])) lbl.toUpperCase();
+            // per-key label without String: a char + NUL (uppercase in place)
+            char lbl[2] = { rawLabel[0], 0 };
+            if (kbMode == 0 && kbCaps && lbl[0] && isalpha((int)lbl[0])) lbl[0] = (char)toupper((int)lbl[0]);
             canvas.drawString(lbl, cx + (cellW - 3) / 2, cy + (rowH - 4) / 2);
             idx++;
         }

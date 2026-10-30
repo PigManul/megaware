@@ -166,6 +166,7 @@ namespace {
             }
         }
         scan->clearResults();
+        BLEDevice::deinit(true); // scan done — unload the stack, free the heap
         snprintf(statusMsg, sizeof(statusMsg), "BLE scan done (%d adv)", n);
         Features::requestRedraw();
     }

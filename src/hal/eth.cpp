@@ -81,10 +81,13 @@ bool EthW5500::start() {
     eth_phy_config_t pcfg = ETH_PHY_DEFAULT_CONFIG();
     pcfg.autonego_timeout_ms = 300;
     esp_eth_phy_t* phy = esp_eth_phy_new_w5500(&pcfg);
-    if (!phy) { snprintf(errMsg, sizeof(errMsg), "phy init failed"); return false; }
+    if (!phy) { mac->del(mac); snprintf(errMsg, sizeof(errMsg), "phy init failed"); return false; }
 
     esp_eth_config_t ecfg = ETH_DEFAULT_CONFIG(mac, phy);
     if (esp_eth_driver_install(&ecfg, &ethHandle) != ESP_OK) {
+        // on install failure IDF does not free mac/phy — release them here
+        mac->del(mac);
+        phy->del(phy);
         snprintf(errMsg, sizeof(errMsg), "driver install failed");
         return false;
     }

@@ -33,7 +33,8 @@ namespace {
         // NDEF URI-запись: D1 01 <L> 55 <prefix 0x00> <url>
         size_t urlLen = strlen(url);
         if (urlLen == 0 || urlLen > 100) { setStatus("empty/long URL", false); return false; }
-        uint8_t ndef[104];
+        // 5 header bytes + 100 url chars max — 112 leaves headroom for TLV copies
+        uint8_t ndef[112];
         size_t payloadLen = 1 + urlLen;
         size_t ndefLen = 0;
         ndef[ndefLen++] = 0xD1;

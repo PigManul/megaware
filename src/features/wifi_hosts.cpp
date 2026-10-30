@@ -113,8 +113,6 @@ namespace {
         }
 
         char line[48];
-        snprintf(line, sizeof(line), "%s.%d/254 — %d hosts open", WiFi.gatewayIP().toString().c_str(), 0, foundCount);
-        line[0] = 0;
         snprintf(line, sizeof(line), "gateway /24 — %d hosts with web ports", foundCount);
         c.setTextColor(Theme::TEXT, Theme::BG);
         c.drawString(line, x0 + 10, y0 + 24);

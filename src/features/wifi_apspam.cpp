@@ -58,8 +58,9 @@ namespace {
     }
 
     // beacon: FC(2) dur(2) DA(6) SA(6) BSS(6) seq(2) | ts(8) int(2) cap(2) | IEs
+    // worst case 36 + 2 + 32 (SSID) + 10 (rates) + 3 (DS) = 83 — 96 gives headroom
     void sendBeacon(const char* ssid, uint8_t ch) {
-        uint8_t pkt[80];
+        uint8_t pkt[96];
         memset(pkt, 0, sizeof(pkt));
         pkt[0] = 0x80; pkt[1] = 0x00;                 // beacon, no flags
         memset(pkt + 4, 0xFF, 6);                     // DA: broadcast

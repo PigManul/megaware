@@ -45,7 +45,9 @@ namespace {
             uint8_t sha[32];
             mbedtls_sha256((const uint8_t*)input.c_str(), input.length(), sha, 0);
             String hex;
-            for (int i = 0; i < 32; i++) hex += String(sha[i] < 16 ? "0" : "") + String(sha[i], 16);
+            hex.reserve(64); // 32 bytes * 2 chars
+            char hb[3];
+            for (int i = 0; i < 32; i++) { snprintf(hb, sizeof(hb), "%02X", sha[i]); hex += hb; }
             File o = cryptoFs().open("/crypto/output.txt", FILE_WRITE);
             if (o) { o.print(hex); o.close(); }
             snprintf(statusMsg, sizeof(statusMsg), "SHA256: %s", hex.substring(0, 16).c_str());
@@ -75,7 +77,9 @@ namespace {
                 mbedtls_aes_crypt_ecb(&aes, MBEDTLS_AES_ENCRYPT, buf + off, buf + off);
             // hex output
             String hex;
-            for (size_t i = 0; i < padded; i++) hex += String(buf[i] < 16 ? "0" : "") + String(buf[i], 16);
+            hex.reserve(padded * 2); // one allocation instead of 2 temporaries per byte
+            char hb[3];
+            for (size_t i = 0; i < padded; i++) { snprintf(hb, sizeof(hb), "%02X", buf[i]); hex += hb; }
             File o = cryptoFs().open("/crypto/output.txt", FILE_WRITE);
             if (o) { o.print(hex); o.close(); }
             snprintf(statusMsg, sizeof(statusMsg), "encrypted %u B (hex)", (unsigned)padded);

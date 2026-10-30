@@ -71,10 +71,11 @@ namespace {
             c.drawString(line, x0 + 10, y0 + 22);
             c.setTextColor(Theme::TEXT, Theme::BG);
             int slen = strlen(dis.summary);
-            String s1 = String(dis.summary).substring(0, slen > 52 ? 52 : slen);
+            char s1[53], s2[53]; // no String per frame
+            snprintf(s1, sizeof(s1), "%s", dis.summary);
             c.drawString(s1, x0 + 10, y0 + 34);
             if (slen > 52) {
-                String s2 = String(dis.summary).substring(52, slen > 104 ? 104 : slen);
+                snprintf(s2, sizeof(s2), "%s", dis.summary + 52);
                 c.drawString(s2, x0 + 10, y0 + 44);
             }
 

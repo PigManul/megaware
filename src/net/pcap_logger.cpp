@@ -48,6 +48,7 @@ bool PcapLogger::start(const String& path) {
     flushBuf();
     pcapFrames = 0;
     strncpy(pcapName, path.c_str(), sizeof(pcapName) - 1);
+    pcapName[sizeof(pcapName) - 1] = 0; // strncpy may not terminate on a full buffer
     pcapActive = true;
     return true;
 }

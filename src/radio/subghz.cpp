@@ -111,8 +111,11 @@ bool SubGhz::isCapturing() {
 }
 
 void SubGhz::stopRawCapture() {
-    if (!capturing) return;
+    // Detach even if the ISR already ended the capture (buffer full set
+    // capturing=false): otherwise the GDO2 interrupt stays attached until
+    // the next capture. No-op when nothing was ever attached.
     detachInterrupt(digitalPinToInterrupt(PIN_CC1101_GDO2));
+    if (!capturing) return;
     capturing = false;
     if (capTarget) {
         capTarget->valid = capTarget->count > 4;

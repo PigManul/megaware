@@ -88,7 +88,7 @@ namespace {
         f.println("Failed authentication attempts: 0");
         for (uint16_t b = 0; b < blocksTotal; b++) {
             f.printf("Block %u:", b);
-            for (int i = 0; i < 16; i++) f.printf(" %02X", fileBuf[b * 16 + i]);
+            for (int i = 0; i < 16 && (uint32_t)b * 16 + i < fileBytes; i++) f.printf(" %02X", fileBuf[b * 16 + i]);
             f.println();
         }
         f.close();

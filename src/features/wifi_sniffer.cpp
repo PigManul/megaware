@@ -66,7 +66,7 @@ namespace {
         uint8_t qosCtl = payload[hdrLen];
         uint8_t qosHi = payload[hdrLen + 1];
         int tid = qosCtl & 0x0F;
-        if (tid < 8) return; // TID 0-7 для QoS data
+        if (tid >= 8) return; // 8-15 are control values, not TIDs (0-7 valid)
         int ac = tidToAc(tid & 0x07);
         acCount[ac]++;
         qosFrames++;
@@ -110,6 +110,7 @@ namespace {
                     uint8_t opt = payload[optOff];
                     if (opt == 0xFF) break;
                     uint8_t olen = payload[optOff+1];
+                    if (optOff + 2 + olen > len) break; // malformed option: do not read past the frame
                     if (opt == 55 && olen >= 3) {
                         // сравнить с сигнатурами
                         for (auto& sig : OS_SIGS) {
@@ -159,18 +160,20 @@ namespace {
             }
         }
 
-        // новый MAC?
-        const uint8_t* sa = pkt->payload + 10; // addr2 (source)
-        bool known = false;
-        for (int i = 0; i < macCount; i++) {
-            if (memcmp(seenMacs[i], sa, 6) == 0) { known = true; break; }
-        }
-        if (!known && macCount < MAX_MACS) {
-            memcpy(seenMacs[macCount], sa, 6);
-            snprintf(macNames[macCount], sizeof(macNames[0]), "%02X:%02X:%02X:%02X:%02X:%02X",
-                     sa[0], sa[1], sa[2], sa[3], sa[4], sa[5]);
-            macCount++;
-            Features::requestRedraw();
+        // новый MAC? (addr2 = source, bytes 10..15 — короткие ctrl-кадры пропускаем)
+        if (pkt->rx_ctrl.sig_len >= 16) {
+            const uint8_t* sa = pkt->payload + 10; // addr2 (source)
+            bool known = false;
+            for (int i = 0; i < macCount; i++) {
+                if (memcmp(seenMacs[i], sa, 6) == 0) { known = true; break; }
+            }
+            if (!known && macCount < MAX_MACS) {
+                memcpy(seenMacs[macCount], sa, 6);
+                snprintf(macNames[macCount], sizeof(macNames[0]), "%02X:%02X:%02X:%02X:%02X:%02X",
+                         sa[0], sa[1], sa[2], sa[3], sa[4], sa[5]);
+                macCount++;
+                Features::requestRedraw();
+            }
         }
         lastPktAt = millis();
 

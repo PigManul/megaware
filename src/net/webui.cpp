@@ -55,6 +55,7 @@ namespace {
         server->stop();
         delete server;
         server = nullptr;
+        activePort = 0; // следующий startServer() выберет порт заново
     }
 
     // DNS привязан к жизни WebUI, а не к AP напрямую: пока :53 клеймен
@@ -546,15 +547,23 @@ namespace {
 
     void handleUploadData() {
         HTTPUpload& upload = server->upload();
-        String fsName = server->arg("fs"), base = server->arg("path");
-        if (!validFs(fsName) || !validPath(base)) return;
         if (upload.status == UPLOAD_FILE_START) {
-            if (!validName(upload.filename)) return;
+            if (uploadFile) uploadFile.close(); // stale handle from an interrupted transfer
+            // fs/path are fixed for the whole request: parse them here only,
+            // otherwise every WRITE chunk (~1.4 KB) allocates fresh Strings
+            String fsName = server->arg("fs"), base = server->arg("path");
+            if (!validFs(fsName) || !validPath(base) || !validName(upload.filename)) {
+                uploadFile = File(); // rejected request: WRITE chunks must not hit the old handle
+                return;
+            }
             String fn = base; if (!fn.endsWith("/")) fn += "/"; fn += upload.filename;
             uploadFile = fsFor(fsName).open(fn, FILE_WRITE);
         } else if (upload.status == UPLOAD_FILE_WRITE) {
             if (uploadFile) uploadFile.write(upload.buf, upload.currentSize);
         } else if (upload.status == UPLOAD_FILE_END) {
+            if (uploadFile) uploadFile.close();
+        } else if (upload.status == UPLOAD_FILE_ABORTED) {
+            // client dropped the connection: otherwise the handle stays open
             if (uploadFile) uploadFile.close();
         }
     }
@@ -593,9 +602,6 @@ namespace {
         server->on("/newfile", HTTP_POST, handleNewFile);
         server->on("/newfolder", HTTP_POST, handleNewFolder);
         server->on("/upload", HTTP_POST, handleUploadDone, handleUploadData);
-        server->on("/hexedit", HTTP_GET, handleHexEditGet);
-        server->on("/hexsave", HTTP_POST, handleHexSavePost);
-        server->on("/api/apdu", HTTP_POST, handleApiApdu);
     }
 
     // =================================================================
@@ -676,6 +682,9 @@ namespace {
             }
             html += "</td></tr>";
             rowCount++;
+            // stream row-by-row: buffering all 16 rows builds a ~40 KB String
+            server->sendContent(html);
+            html = "";
         }
         html += "</table><br><button class='btn' type='submit'>💾 Save</button></form>";
         html += "<div class='toolbar' style='margin-top:10px'>";
@@ -998,6 +1007,7 @@ namespace {
                 if (!f || f.isDirectory()) { ok = false; out = "cannot open " + t1; }
                 else {
                     out = "";
+                    out.reserve(1600); // single growth instead of ~1500 reallocations
                     int lim = 1500;
                     while (f.available() && lim-- > 0) out += (char)f.read();
                     f.close();
@@ -1354,6 +1364,7 @@ void WebUI::start() {
 
 void WebUI::stop() {
     enabled = false;
+    if (uploadFile) uploadFile.close(); // upload interrupted mid-transfer
     stopServer();
     stopDns();
 }
