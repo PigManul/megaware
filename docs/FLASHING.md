@@ -50,7 +50,7 @@ In VSCode with the PlatformIO extension, everything is the same with the buttons
 
 - **OTA over Wi-Fi** — WebUI → **OTA UPDATE** → select
   `.pio/build/t-embed-cc1101/firmware.bin` → the device flashes the second
-  slot and reboots itself. File must fit 3 MB. Works over Wi-Fi and
+  slot and reboots itself. File must fit 4.5 MB. Works over Wi-Fi and
   cable/W5500.
 - **On-device from file** — copy `firmware.bin` to the SD card or flash
   storage, on the device open *Files* and **hold OK** on the file.

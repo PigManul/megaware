@@ -763,6 +763,9 @@ namespace {
         j += String(",\"fw\":\"") + MW_FW_VERSION + "\"";
         j += String(",\"sweep\":") + (SubGhz::webSpectrumActive() ? "true" : "false");
         j += "}";
+        // без no-store браузер кэширует GET-ответ: график живёт, а подписи
+        // частот (тот же JSON) остаются от старого диапазона
+        server->sendHeader("Cache-Control", "no-store");
         server->send(200, "application/json", j);
     }
 
@@ -778,6 +781,7 @@ namespace {
             j += String(s.dbm[i], 1);
         }
         j += "]}";
+        server->sendHeader("Cache-Control", "no-store");
         server->send(200, "application/json", j);
     }
 
@@ -815,8 +819,14 @@ namespace {
                 if (band >= 0 && band <= 3) {
                     const static float P[4][3] = {{433.00f, 0.05f, 36}, {868.00f, 0.025f, 25}, {314.00f, 0.05f, 41}, {902.00f, 0.20f, 66}};
                     SubGhz::setSpectrumRange(P[band][0], P[band][1], (int)P[band][2]);
+                    // сброс: без него за новым диапазоном таскались значения dbm
+                    // предыдущего (и первая отрисовка могла показать смесь)
+                    SubGhz::SpectrumData& sd = SubGhz::sharedSpectrum();
+                    for (int i = 0; i < sd.count; i++) sd.dbm[i] = -120;
+                    sd.lastUpdateMs = 0;
                     SubGhz::webSpectrum(band);
-                    out = "sweep on, band " + String(band);
+                    out = "sweep on, band " + String(band) + " (" + String(P[band][0], 2)
+                        + ".." + String(P[band][0] + P[band][1] * P[band][2], 2) + " MHz)";
                 } else { ok = false; out = "usage: spectrum on <0..3> | spectrum off"; }
             } else { ok = false; out = "usage: spectrum on <0..3> | spectrum off"; }
         } else if (cmd == "ping") {
@@ -1014,6 +1024,7 @@ namespace {
             out = "unknown cmd - type 'help' (full docs: /docs)";
         }
         String j = String("{\"ok\":") + (ok ? "true" : "false") + ",\"out\":\"" + jsonEscape(out) + "\"}";
+        server->sendHeader("Cache-Control", "no-store");
         server->send(200, "application/json", j);
     }
 
@@ -1077,13 +1088,13 @@ namespace {
             "}"
             "async function poll(){"
             "  try{"
-            "    var r=await fetch('/api/status');"
+                    "    var r=await fetch('/api/status?t='+Date.now());"
             "    var st=await r.json();"
             "    document.getElementById('live').innerHTML="
             "      'IP <b>'+st.ip+'</b> | RSSI <b>'+st.rssi+' dBm</b> | Heap <b>'+Math.round(st.heap/1024)+' KB</b>'"
             "      +' | PSRAM <b>'+Math.round(st.psram/1024)+' KB</b> | Batt <b>'+st.batt+'%</b>'+(st.chg?'(chg)':'')"
             "      +' | Up <b>'+Math.floor(st.uptime/60)+'m</b> | sweep <b>'+(st.sweep?'ON':'off')+'</b>';"
-            "    var sr=await fetch('/api/spectrum');"
+            "    var sr=await fetch('/api/spectrum?t='+Date.now());"
             "    var sp=await sr.json();"
             "    var cv=document.getElementById('spec');"
             "    var ctx=cv.getContext('2d');"
@@ -1178,7 +1189,7 @@ namespace {
             "<table>"
             "<tr><td><b>OTA over Wi-Fi</b></td><td>The <i>OTA UPDATE</i> page on this site (button there says "
             "\"Flash over OTA\"). Uploads <i>firmware.bin</i> from the browser into the second app slot — "
-            "the file must fit 3 MB. USB cable not involved.</td></tr>"
+            "the file must fit 4.5 MB. USB cable not involved.</td></tr>"
             "<tr><td><b>USB cable</b></td><td><code>pio run -t upload</code> from the project folder "
             "(PlatformIO). Full reflash including the partition table — any size. "
             "See <i>docs/FLASHING.md</i> in the repository.</td></tr>"
@@ -1200,12 +1211,12 @@ namespace {
         sendTopbar("ota firmware update");
         server->sendContent(
             "<div class='pill' style='display:block'>This page is <b>OTA over Wi-Fi</b>: the .bin is uploaded "
-            "from your browser into the second app slot (max 3 MB). <b>It is not USB flashing.</b> "
+            "from your browser into the second app slot (max 4.5 MB). <b>It is not USB flashing.</b> "
             "The device verifies the image and reboots automatically. Current version: " MW_FW_VERSION "</div>"
             "<div class='pill' style='display:block;margin-top:8px'>Three ways to flash firmware:</div>"
             "<table style='margin-top:8px'>"
             "<tr><td><b>OTA</b> (this page)</td><td>Upload <i>firmware.bin</i> from the browser over Wi-Fi. "
-            "File must fit the OTA slot (3 MB) — use <i>.pio/build/t-embed-cc1101/firmware.bin</i>.</td></tr>"
+            "File must fit the OTA slot (4.5 MB) — use <i>.pio/build/t-embed-cc1101/firmware.bin</i>.</td></tr>"
             "<tr><td><b>USB cable</b></td><td>PlatformIO: <code>pio run -t upload</code>. Full reflash, "
             "any size — see <i>docs/FLASHING.md</i>.</td></tr>"
             "<tr><td><b>On-device</b></td><td>Copy <i>firmware.bin</i> to SD or flash storage, open "
