@@ -21,6 +21,7 @@
 
 namespace {
     WebServer* server = nullptr;
+    int activePort = 0; // 80 = основной, 8080 = запасной, пока :80 клеймен порталом
     DNSServer* dns = nullptr;
     bool enabled = false; // пользовательский тумблер (Wi-Fi -> WebUI)
     File uploadFile;
@@ -41,7 +42,10 @@ namespace {
 
     void startServer() {
         if (server) return;
-        server = new WebServer(80);
+        // :80 клеймен фичей (captive portal и т.п.) — не молчим: уходим на
+        // запасной порт, WebUI остаётся доступен по http://<ip>:8080
+        activePort = ResMgr::isHeld(ResMgr::Resource::Http80) ? 8080 : 80;
+        server = new WebServer(activePort);
         registerRoutes(); // см. внизу файла: все server->on(...)
         server->begin();
     }
@@ -1343,9 +1347,9 @@ namespace {
 
 void WebUI::start() {
     enabled = true;
-    // Если :80 клеймен фичей — не влезаем: сервер поднимется лениво в
-    // loop() после release. WebUI не хозяин порта.
-    if (!ResMgr::isHeld(ResMgr::Resource::Http80)) startServer();
+    // :80 клеймен фичей — поднимаемся на запасном :8080 (миграция
+    // туда-обратно живёт в loop()); WebUI не хозяин порта.
+    startServer();
 }
 
 void WebUI::stop() {
@@ -1361,8 +1365,12 @@ void WebUI::loop() {
 
     // Арбитраж с фичами: клейм на :80/:53 выгоняет нас с ресурса,
     // release возвращает. Состояние enabled при этом сохраняется.
-    if (ResMgr::isHeld(ResMgr::Resource::Http80)) stopServer();
-    else startServer(); // no-op, если уже поднят; отложенный старт после release
+    // Миграция порта: :80 клеймен порталом/фичей — съезжаем на :8080
+    // (WebUI продолжает работать), ресурс освободился — возвращаемся на :80.
+    bool held80 = ResMgr::isHeld(ResMgr::Resource::Http80);
+    if (held80 && activePort == 80) stopServer();
+    else if (!held80 && activePort == 8080) stopServer();
+    else startServer(); // поднять на нужном порту / no-op, если уже поднят
 
     if (ResMgr::isHeld(ResMgr::Resource::Dns53)) stopDns();
     else if (!dns && WifiMgr::isAPRunning()) {
