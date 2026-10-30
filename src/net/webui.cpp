@@ -17,6 +17,7 @@
 #include "../hal/nfc.h"
 #include "../storage/files.h"
 #include "../ui/ui.h"
+#include "../hal/bridge_cfg.h"
 
 namespace {
     WebServer* server = nullptr;
@@ -884,6 +885,7 @@ namespace {
                 "rm <sd|flash> <file>  delete file\n"
                 "bright <10..255>      display backlight\n"
                 "theme <0..3>          accent color preset\n"
+                "bridge [add|on|off|del]  TCP bridge port-forward rules\n"
                 "led <r> <g> <b>       encoder LED color (solid)\n"
                 "ledmode <0..4>        0 off 1 solid 2 breathing 3 tail 4 rainbow\n"
                 "spectrum on <0..3> | off   CC1101 sweep (graph above)\n"
@@ -1015,6 +1017,60 @@ namespace {
             int v = cmd.substring(7).toInt();
             if (v >= 10 && v <= 255) { ui.webSetBrightness((uint8_t)v); out = "brightness " + String(v); }
             else { ok = false; out = "usage: bright <10..255>"; }
+        } else if (cmd == "bridge" || cmd.startsWith("bridge ")) {
+            // TCP bridge rules: slots 0..1, applied by the TCP Bridge feature
+            BridgeRule rules[BridgeCfg::SLOTS];
+            BridgeCfg::load(rules);
+            String a = cmd == "bridge" ? "" : cmd.substring(7);
+            a.trim();
+            if (a.length() == 0) {
+                out = "";
+                for (int i = 0; i < BridgeCfg::SLOTS; i++) {
+                    out += String("[") + i + "] " + (rules[i].enabled ? "ON " : "off")
+                         + " :" + rules[i].lport + " -> " + (rules[i].host[0] ? rules[i].host : "(empty)")
+                         + ":" + rules[i].rport + "\n";
+                }
+                out += "bridge add <lport> <host> <rport> | on/off/del <slot>";
+            } else if (a.startsWith("add ")) {
+                int s0 = a.indexOf(' ', 4), s1 = a.indexOf(' ', s0 + 1);
+                if (s0 < 0 || s1 < 0) { ok = false; out = "usage: bridge add <lport> <host> <rport>"; }
+                else {
+                    int slot = -1;
+                    for (int i = 0; i < BridgeCfg::SLOTS; i++)
+                        if (!rules[i].host[0]) { slot = i; break; }
+                    if (slot < 0) { ok = false; out = "no free slot (2 max), bridge del first"; }
+                    else {
+                        BridgeRule r;
+                        r.enabled = true;
+                        r.lport = (uint16_t)a.substring(4, s0).toInt();
+                        String h = a.substring(s0 + 1, s1); h.trim();
+                        strncpy(r.host, h.c_str(), sizeof(r.host) - 1);
+                        r.rport = (uint16_t)a.substring(s1 + 1).toInt();
+                        if (!r.lport || !r.host[0] || !r.rport) { ok = false; out = "bad args"; }
+                        else {
+                            BridgeCfg::save(slot, r);
+                            out = String("slot ") + slot + ": :" + r.lport + " -> " + r.host + ":" + r.rport
+                                + " (start the TCP Bridge feature)";
+                        }
+                    }
+                }
+            } else if (a.startsWith("on ") || a.startsWith("off ")) {
+                int slot = a.substring(3).toInt();
+                if (slot < 0 || slot >= BridgeCfg::SLOTS) { ok = false; out = "slot 0..1"; }
+                else {
+                    rules[slot].enabled = a.startsWith("on");
+                    BridgeCfg::save(slot, rules[slot]);
+                    out = String("slot ") + slot + (rules[slot].enabled ? " on" : " off");
+                }
+            } else if (a.startsWith("del ")) {
+                int slot = a.substring(3).toInt();
+                if (slot < 0 || slot >= BridgeCfg::SLOTS) { ok = false; out = "slot 0..1"; }
+                else {
+                    BridgeRule r; // empty rule clears the slot
+                    BridgeCfg::save(slot, r);
+                    out = String("slot ") + slot + " cleared";
+                }
+            } else { ok = false; out = "usage: bridge | bridge add <lport> <host> <rport> | bridge on/off/del <slot>"; }
         } else if (cmd.startsWith("theme ")) {
             int v = cmd.substring(6).toInt();
             if (ui.webSetAccentPreset(v)) out = "theme preset " + String(v);
@@ -1184,6 +1240,15 @@ namespace {
             "<tr><td><b>ir</b> &lt;PROTO&gt; &lt;value&gt; [bits]</td><td>Send an infrared code. Protocols: NEC, SONY, RC5, RC6, SAMSUNG, LG, JVC, PANASONIC. "
             "Value accepts decimal or 0x-hex. Example: <i>ir NEC 0x1FE807F</i></td></tr>"
             "<tr><td><b>irraw</b> &lt;hz&gt; &lt;t1&gt; &lt;t2&gt; ...</td><td>Send raw IR timings in microseconds (sign is ignored). Example: <i>irraw 38000 9000 -4500 550 -550</i></td></tr>"
+            "</table>"
+            "<h3 style='color:#39ff88'>TCP bridge</h3>"
+            "<table>"
+            "<tr><td><b>bridge</b></td><td>List port-forward rules (2 slots).</td></tr>"
+            "<tr><td><b>bridge add</b> &lt;lport&gt; &lt;host&gt; &lt;rport&gt;</td><td>Add a rule: the board listens on "
+            "lport (any interface, incl. cable) and relays TCP to host:rport over the Wi-Fi uplink. "
+            "Example: <i>bridge add 8000 192.168.1.1 80</i> — then open <i>192.168.169.1:8000</i> from a cable client.</td></tr>"
+            "<tr><td><b>bridge on|off|del</b> &lt;slot&gt;</td><td>Enable / disable / clear a rule slot (0 or 1). "
+            "Start the <i>TCP Bridge</i> feature on the device to run the bridge.</td></tr>"
             "</table>"
             "<h3 style='color:#39ff88'>Flashing the firmware</h3>"
             "<table>"

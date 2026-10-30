@@ -45,6 +45,9 @@ namespace Nfc {
     bool classicWriteBlock(uint8_t block, const uint8_t* data);
     // The key (6 bytes) that opened the last auth (for the key map).
     bool lastAuthKey(uint8_t keyOut[6]);
+    // Authentication test ONLY (no read): true if this key opens the
+    // sector containing `block`. Used by the Key Hunter feature.
+    bool classicTryKey(uint8_t block, const uint8_t key[6], bool keyA);
 
     // Raw ISO14443-4 APDU to the active card (after readTag). out ≤ 255.
     bool apdu(const uint8_t* in, int inLen, uint8_t* out, int* outLen);

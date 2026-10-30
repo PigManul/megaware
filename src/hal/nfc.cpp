@@ -189,6 +189,14 @@ bool lastAuthKey(uint8_t keyOut[6]) {
     return true;
 }
 
+bool classicTryKey(uint8_t block, const uint8_t key[6], bool keyA) {
+    if (!ready || !lastIsClassic || lastUidLen == 0) return false;
+    // 0 = KEY A, 1 = KEY B (Adafruit-PN532 convention)
+    invalidateAuth(); // the sector key cache is no longer trustworthy
+    return pn532.mifareclassic_AuthenticateBlock(lastUid, lastUidLen, block,
+                                                 keyA ? 0 : 1, (uint8_t*)key) == 1;
+}
+
 bool classicWriteBlock(uint8_t block, const uint8_t* data) {
     if (!ready || !lastIsClassic || lastUidLen == 0) return false;
     uint8_t sector = (block < 128) ? block / 4 : 32 + (block - 128) / 16;
