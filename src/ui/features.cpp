@@ -80,6 +80,7 @@ void init() {
         kept++;
     }
     regCount = kept;
+    Serial.printf("[MEGAWARE] features registered: %d (capacity %d)\n", regCount, MW_MAX_FEATURES);
 
     // Stable insertion sort by (slot, order, original order).
     for (int i = 1; i < regCount; i++) {

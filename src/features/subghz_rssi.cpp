@@ -36,5 +36,5 @@ namespace {
     }
 }
 
-REGISTER_FEATURE("Scan", MwCat::SubGhz, MwIcon::None, 1,
+REGISTER_FEATURE("Live RSSI", MwCat::SubGhz, MwIcon::None, 1,
                  nullptr, nullptr, nullptr, draw, nullptr);
