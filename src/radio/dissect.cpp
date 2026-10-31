@@ -95,6 +95,21 @@ bool Dissect::analyze(const RawCapture& cap, DissectResult& out) {
     DissectResult ppm = out;
     int ppmDigits = decodePpm(runs, runsN, ppm);
 
+    // measured long/short ratio + EV1527-style sync gap
+    float ratio = 0;
+    bool longGap = false;
+    {
+        float sSum = 0, lSum = 0;
+        int pairs = 0;
+        for (int i = 0; i + 1 < runsN && pairs < 64; i += 2) {
+            uint32_t a = runs[i], b = runs[i + 1];
+            uint32_t s = a < b ? a : b, l = a < b ? b : a;
+            if (s >= 1 && l >= 2 * s) { sSum += s; lSum += l; pairs++; }
+        }
+        if (pairs >= 8) ratio = lSum / sSum;
+        for (int i = 0; i < runsN; i++) if (runs[i] >= 8) { longGap = true; break; }
+    }
+
     // --- Manchester candidate: pairs of cells, both polarities ---
     int manScore[2] = {0, 0};
     static DissectResult man[2];
@@ -157,12 +172,7 @@ bool Dissect::analyze(const RawCapture& cap, DissectResult& out) {
     if (out.enc == 0 && out.digitCount == 12) {
         bool hasF = false;
         for (int d = 0; d < 12; d++) if (out.digits[d] == 2) hasF = true;
-        if (!hasF) {
-            out.proto = "CAME / Nice Flo";
-            uint32_t v = 0;
-            for (int d = 0; d < 12; d++) v = (v << 1) | (out.digits[d] & 1);
-            snprintf(out.summary, sizeof(out.summary), "12-bit gate remote, code 0x%03X", (unsigned)v);
-        } else {
+        if (hasF) {
             out.proto = "Princeton PT-2262";
             char dig[13];
             for (int d = 0; d < 12; d++) dig[d] = out.digits[d] == 2 ? 'F' : ('0' + out.digits[d]);
@@ -171,6 +181,42 @@ bool Dissect::analyze(const RawCapture& cap, DissectResult& out) {
             for (int d = 8; d < 12; d++) btn = (btn << 1) | (out.digits[d] & 1);
             snprintf(out.summary, sizeof(out.summary), "addr %.8s, buttons %.4s (0x%02lX)",
                      dig, dig + 8, (unsigned long)btn);
+        } else if (ratio > 0 && ratio < 2.55f) {
+            out.proto = "CAME / Nice Flo";
+            uint32_t v = 0;
+            for (int d = 0; d < 12; d++) v = (v << 1) | (out.digits[d] & 1);
+            snprintf(out.summary, sizeof(out.summary), "12-bit gate, code 0x%03X (k=%.1f)",
+                     (unsigned)v, (double)ratio);
+        } else {
+            out.proto = "Holtek-like 12-bit";
+            uint32_t v = 0;
+            for (int d = 0; d < 12; d++) v = (v << 1) | (out.digits[d] & 1);
+            // HT-12E family: 8 address + 4 data bits
+            snprintf(out.summary, sizeof(out.summary), "addr 0x%02X data 0x%X (k=%.1f)",
+                     (unsigned)(v >> 4), (unsigned)(v & 0xF), (double)ratio);
+        }
+    } else if (out.enc == 0 && out.digitCount == 24) {
+        bool hasF = false;
+        for (int d = 0; d < 24; d++) if (out.digits[d] == 2) hasF = true;
+        uint32_t v = 0;
+        for (int d = 0; d < 24; d++) v = (v << 1) | (out.digits[d] & 1);
+        if (longGap || ratio >= 2.55f) {
+            out.proto = "EV1527";
+            // EV1527: 24-bit PWM 1:3, frames separated by a long sync gap;
+            // typical remotes: 20 addr + 4 button bits
+            snprintf(out.summary, sizeof(out.summary), "code 0x%06lX (addr %05lX btn %lX, k=%.1f)",
+                     (unsigned long)v, (unsigned long)(v >> 4), (unsigned long)(v & 0xF),
+                     (double)(ratio ? ratio : 3.0f));
+        } else if (hasF) {
+            out.proto = "PT-2262 ext";
+            char dig[26];
+            for (int d = 0; d < 24; d++) dig[d] = out.digits[d] == 2 ? 'F' : ('0' + out.digits[d]);
+            dig[24] = 0;
+            snprintf(out.summary, sizeof(out.summary), "24 digits: %.24s", dig);
+        } else {
+            out.proto = "24-bit fixed code";
+            snprintf(out.summary, sizeof(out.summary), "code 0x%06lX (addr %05lX btn %lX)",
+                     (unsigned long)v, (unsigned long)(v >> 4), (unsigned long)(v & 0xF));
         }
     } else if (out.enc == 0 && out.digitCount >= 16 && out.digitCount <= 28) {
         out.proto = "PPM remote";
@@ -178,7 +224,8 @@ bool Dissect::analyze(const RawCapture& cap, DissectResult& out) {
         int show = out.digitCount < 28 ? out.digitCount : 28;
         for (int d = 0; d < show; d++) dig[d] = out.digits[d] == 2 ? 'F' : ('0' + out.digits[d]);
         dig[show] = 0;
-        snprintf(out.summary, sizeof(out.summary), "%d digits: %s", out.digitCount, dig);
+        snprintf(out.summary, sizeof(out.summary), "%d digits: %s (k=%.1f)", out.digitCount, dig,
+                 (double)ratio);
     } else if (out.enc == 1) {
         out.proto = "Manchester frame";
         Dissect::hexOf(out, hex, sizeof(hex));
@@ -198,6 +245,8 @@ bool Dissect::analyze(const RawCapture& cap, DissectResult& out) {
     }
 
     out.valid = true;
+    out.ratio = ratio;
+    out.longGap = longGap;
     return true;
 }
 
@@ -210,4 +259,22 @@ void Dissect::hexOf(const DissectResult& r, char* buf, size_t bufsz) {
         o += 2;
     }
     if (o < bufsz) buf[o] = 0;
+}
+
+void Dissect::dewhitenPn9(DissectResult& r) {
+    // CC1101 whitening: PN9 keystream, 9-bit LFSR, seed 0x1FF,
+    // poly x^9+x^5+1, output LSB first, one fresh 9-bit phase per byte
+    uint16_t lfsr = 0x1FF;
+    int bytes = (r.bitCount + 7) / 8;
+    for (int i = 0; i < bytes; i++) {
+        uint8_t ks = 0;
+        for (int b = 0; b < 8; b++) {  // keystream bits LSB-first
+            ks >>= 1;
+            if (lfsr & 1) ks |= 0x80;
+            uint8_t fb = ((lfsr & 1) ^ ((lfsr >> 5) & 1)) & 1;
+            lfsr = (lfsr >> 1) | (fb << 8);
+        }
+        r.bits[i] ^= ks;
+    }
+    r.dewhitened = true;
 }

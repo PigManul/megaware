@@ -19,6 +19,9 @@ namespace SubGhz {
     float currentFrequencyMHz();
 
     float readRssiDbm();
+    // CC1101 link quality 0..255 (demodulator correlation). High LQI +
+    // decent RSSI = real modulation; low LQI = noise / falses.
+    int readLqi();
 
     void startRawCapture(RawCapture* target, uint32_t timeoutMs);
     bool isCapturing();

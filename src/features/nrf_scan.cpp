@@ -1,7 +1,12 @@
 // =====================================================================
-//  RF24: Scanner — 2.4 GHz activity across channels 0..126. An external
-//  NRF24 module in the Grove port is REQUIRED (CE=43, CS=44, SPI 9/10/11). The bus
-//  runs on a separate controller (HSPI) so it does not conflict with the display.
+//  RF24: Scan — LIVE oscilloscope of the 2.4 GHz band.
+//  Fast, responsive view: short decay, per-channel carrier probe while
+//  staying in RX (no per-channel mode switching - the PLL relocks in
+//  ~150 us, so a full 126-channel pass takes ~30-120 ms depending on
+//  the dwell setting). Rotation: dwell speed. Click: pause/resume.
+//  A twin feature, "Wideband", is the slow accumulating ANALYZER with
+//  traffic classification - this one is the fast eyeball.
+//  External NRF24 module in the Grove port (CE 43, CS 44, SPI 9/10/11).
 // =====================================================================
 #include "../ui/features.h"
 #include "../../include/pins.h"
@@ -20,8 +25,15 @@ namespace {
     bool radioOk = false;
     bool inited = false;
 
-    uint8_t levels[126] = {0};    // per-channel activity (0..~5)
+    constexpr int MAX_LVL = 100;
+    uint8_t levels[126] = {0};
     uint32_t lastSweep = 0;
+    uint32_t sweeps = 0;
+    bool paused = false;
+
+    // dwell presets (us): capped so one blocking pass stays under ~80 ms
+    static const uint16_t DWELLS[4] = {150, 280, 450, 600};
+    int dwellIdx = 1;
 
     bool initRadio() {
         if (radioOk) return true;
@@ -32,32 +44,40 @@ namespace {
             inited = true;
         }
         radioOk = radio.begin(&SPI) && radio.isChipConnected();
-        if (radioOk) radio.stopListening();
+        if (radioOk) {
+            radio.stopListening();
+            radio.startListening(); // stay in RX: only setChannel() per step
+        }
         return radioOk;
     }
 
     void sweep() {
-        // 127 channels at ~300 us each = ~40 ms per pass
-        radio.stopListening();
+        // stay in RX mode, relock PLL per channel - no CE toggling
         for (int ch = 0; ch < 126; ch++) {
             radio.setChannel(ch);
-            radio.startListening();
-            delayMicroseconds(280);
+            delayMicroseconds(DWELLS[dwellIdx]);
             bool active = radio.testCarrier() || radio.testRPD();
-            radio.stopListening();
             if (active) {
-                if (levels[ch] < 250) levels[ch] += 8;   // fast rise
+                if (levels[ch] < MAX_LVL) levels[ch] += 12;  // fast rise
             } else if (levels[ch]) {
-                levels[ch] -= 1;                          // slow decay
+                levels[ch] -= 5;                             // fast decay: live picture
             }
         }
+        sweeps++;
+    }
+
+    int peakCh() {
+        int peak = 0;
+        for (int ch = 0; ch < 126; ch++) if (levels[ch] > levels[peak]) peak = ch;
+        return peak;
     }
 
     void draw(LGFX_Sprite& c, int x0, int y0, int w, int h) {
-        MwDraw::card(c, x0, y0, w, h, "NRF24 SCANNER");
+        MwDraw::card(c, x0, y0, w, h, "RF SCAN (LIVE)");
         c.setFont(&fonts::Font0);
         c.setTextSize(Theme::SIZE_TEXT);
         c.setTextDatum(textdatum_t::top_left);
+        char line[52];
 
         if (!initRadio()) {
             c.setTextColor(Theme::ERR, Theme::BG);
@@ -67,27 +87,57 @@ namespace {
             return;
         }
 
+        c.setTextColor(paused ? Theme::WARN : Theme::OK, Theme::BG);
+        snprintf(line, sizeof(line), "%s  sweep %lu  dwell %u us",
+                 paused ? "PAUSED" : "running", (unsigned long)sweeps, DWELLS[dwellIdx]);
+        c.drawString(line, x0 + 10, y0 + 20);
+
+        int p = peakCh();
+        c.setTextColor(Theme::ACCENT, Theme::BG);
+        snprintf(line, sizeof(line), "peak ch %d (%.3f GHz)  lvl %d%%",
+                 p, 2.400f + p * 0.001f, levels[p] * 100 / MAX_LVL);
+        c.drawString(line, x0 + 10, y0 + 32);
+
         int baseY = y0 + h - 18;
         int bw = (w - 8) / 126;
         if (bw < 2) bw = 2;
-        c.setTextDatum(textdatum_t::middle_center);
         for (int ch = 0; ch < 126; ch++) {
-            int bh = levels[ch] * (h - 46) / 250;
+            int bh = levels[ch] * (h - 60) / MAX_LVL;
             if (bh > 0) c.fillRect(x0 + 4 + ch * bw, baseY - bh, bw - 1, bh, Theme::ACCENT);
         }
-        c.setTextColor(Theme::TEXT_DIM, Theme::BG);
-        c.drawString("2400", x0 + 10, baseY + 8);
-        c.drawString("2525 MHz", x0 + w - 30, baseY + 8);
-        c.setTextDatum(textdatum_t::top_left);
+        c.drawFastHLine(x0 + 4, baseY, w - 8, Theme::TEXT_DIM);
         c.setTextColor(Theme::TEXT_FAINT, Theme::BG);
-        c.drawString("external module (Grove port)", x0 + 10, y0 + 22);
+        c.drawString("2400", x0 + 6, baseY + 4);
+        c.drawString("2462", x0 + w / 2 - 14, baseY + 4);
+        c.drawString("2525 MHz", x0 + w - 42, baseY + 4);
+
+        c.setTextColor(Theme::TEXT_FAINT, Theme::BG);
+        c.drawString("rot: dwell speed   click: pause/resume", x0 + 10, y0 + h - 30);
     }
 
-    bool input(const InputState& in) { return false; }
+    bool input(const InputState& in) {
+        if (in.rotationSteps != 0) {
+            dwellIdx = (dwellIdx + in.rotationSteps + 4) % 4;
+            Features::requestRedraw();
+            return true;
+        }
+        if (in.event == InputEvent::Click) {
+            paused = !paused;
+            Features::requestRedraw();
+            return true;
+        }
+        if (in.event == InputEvent::LongPress) {
+            memset(levels, 0, sizeof(levels)); // clear the picture
+            Features::requestRedraw();
+            return true;
+        }
+        return false;
+    }
 
     void tick() {
         if (!radioOk && !initRadio()) return;
-        if (millis() - lastSweep >= 80) {  // ~10 passes/s
+        if (paused) return;
+        if (millis() - lastSweep >= 60) {
             lastSweep = millis();
             sweep();
             Features::requestRedraw();
@@ -95,7 +145,10 @@ namespace {
     }
 
     void onExit() {
-        if (radioOk) radio.powerDown();
+        if (radioOk) {
+            radio.stopListening();
+            radio.powerDown();
+        }
     }
 }
 

@@ -21,6 +21,7 @@ namespace {
 
     RawCapture cap;
     DissectResult dis;
+    bool dewhit = false;      // PN9 de-scrambling toggle (rotation)
     int hist[6] = {0};        // bucket counts: ~1u, 2u, 3u..4u, 5u..8u, 9u..16u, >16u
     char statusMsg[48] = "";
 
@@ -46,6 +47,7 @@ namespace {
             else hist[5]++;
         }
         Dissect::analyze(cap, dis);
+        if (dewhit && dis.valid && dis.bitCount >= 16) Dissect::dewhitenPn9(dis);
     }
 
     void draw(LGFX_Sprite& c, int x0, int y0, int w, int h) {
@@ -96,11 +98,9 @@ namespace {
             snprintf(line, sizeof(line), "unit %lu us  ~%lu us/cell  edges %lu",
                      (unsigned long)dis.unitUs, (unsigned long)dis.baud, (unsigned long)cap.count);
             c.drawString(line, x0 + 10, y0 + 100);
-            if (dis.digitCount > 0) {
-                c.setTextColor(Theme::TEXT, Theme::BG);
-                snprintf(line, sizeof(line), "digits: %d (F = tri-state)", dis.digitCount);
-                c.drawString(line, x0 + 10, y0 + 110);
-            }
+            c.setTextColor(dewhit ? Theme::OK : Theme::TEXT_FAINT, Theme::BG);
+            snprintf(line, sizeof(line), "PN9 de-whiten: %s (rot toggles)", dewhit ? "ON" : "off");
+            c.drawString(line, x0 + 10, y0 + 110);
         }
         if (statusMsg[0]) {
             c.setTextColor(Theme::ERR, Theme::BG);
@@ -111,6 +111,13 @@ namespace {
     }
 
     bool input(const InputState& in) {
+        if (in.rotationSteps != 0 && state == Analyzed) {
+            // rotation toggles PN9 de-whitening and re-decodes in place
+            dewhit = !dewhit;
+            analyze();
+            Features::requestRedraw();
+            return true;
+        }
         if (in.event == InputEvent::Click) {
             if (state != Capturing && SubGhz::isReady()) {
                 state = Capturing;

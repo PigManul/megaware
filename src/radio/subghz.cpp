@@ -85,6 +85,11 @@ float SubGhz::readRssiDbm() {
     return ELECHOUSE_cc1101.getRssi();
 }
 
+int SubGhz::readLqi() {
+    if (!ready) return 0;
+    return (int)ELECHOUSE_cc1101.getLqi();
+}
+
 void SubGhz::startRawCapture(RawCapture* target, uint32_t timeoutMs) {
     if (!ready || target == nullptr) return;
 

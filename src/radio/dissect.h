@@ -35,6 +35,9 @@ struct DissectResult {
     uint8_t digits[144];         // 0, 1 or 2 (= tri-state F)
     int preambleBits = 0;        // leading alternating 0/1 run length (bits)
     uint16_t sync = 0;           // 16-bit sync word after the preamble (0 = none)
+    float ratio = 0;             // measured long/short pulse ratio (PPM)
+    bool longGap = false;        // gap run >= 8 units (EV1527-style framing)
+    bool dewhitened = false;     // PN9 de-scrambling applied (bytes XORed)
     const char* proto = "unknown";
     char summary[160] = "";      // human-readable decode
 };
@@ -43,4 +46,8 @@ namespace Dissect {
     bool analyze(const RawCapture& cap, DissectResult& out);
     // bits as hex into buf (up to 64 bytes = 128 chars)
     void hexOf(const DissectResult& r, char* buf, size_t bufsz);
+    // XOR the decoded byte stream with the CC1101 PN9 keystream
+    // (seed 0x1FF, poly x^9+x^5+1, LSB-first per byte) - reverses
+    // hardware whitening used by BLE-like Sub-GHz senders.
+    void dewhitenPn9(DissectResult& r);
 }
