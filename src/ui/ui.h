@@ -29,7 +29,7 @@
 enum class Section { Wifi, SubGhz, Files, Bluetooth, Settings, COUNT };
 
 enum class FocusLevel { Sidebar, SubTab, Field, Modal, Feature };
-enum class ModalKind { None, WifiPassword };
+enum class ModalKind { None, WifiPassword, Reader };
 
 class Ui {
 public:
@@ -124,6 +124,18 @@ private:
     int kbMode = 0;
     bool kbCaps = false;
 
+    // --- Modal: File Reader (book view of .txt/.pdf from Files) ---
+    // All buffers live in PSRAM: text + wrapped-line offset table are
+    // allocated on open and freed on close, zero static RAM cost.
+    char readerPath[112] = "";
+    bool readerPdf = false;
+    bool readerCp1251 = false;
+    char* readerText = nullptr;      // PSRAM: full text (transliterated)
+    uint32_t readerTextLen = 0;
+    uint32_t* readerLines = nullptr; // PSRAM: text offset of each display line
+    uint32_t readerLineCount = 0;
+    uint32_t readerCur = 0;          // current top display line
+
     // --- redraw on demand (see tick()) ---
     // A full frame is ~106 KB over SPI; draw only when something
     // actually changed: input, a Wi-Fi/scan state change, or the
@@ -153,6 +165,9 @@ private:
     void tickPlayback(); // feeds I2S/DMA on every tick
     bool flashFirmwareFile(FsRoot root, const String& path); // hold on a .bin in Files
     void saveLedSettings(); // NVS: the whole Customize > LED screen
+    void openReader(FsRoot root, const String& path);  // hold on .txt/.pdf in Files
+    void closeReader();
+    void drawModalReader();
 
     // --- shared Terminal-Lite elements ---
     void drawScreen();            // header + content per focus level + footer

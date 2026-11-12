@@ -17,6 +17,7 @@
 #include <HTTPClient.h>
 #include <Update.h>
 #include <esp_ota_ops.h>
+#include <esp32s3/rom/miniz.h> // ROM tinfl: PDF FlateDecode streams
 
 // MP3: single-header decoder (public domain), implementation included once.
 #define MINIMP3_ONLY_MP3
@@ -626,7 +627,8 @@ void Ui::tick(const InputState& in) {
         handleModalInput(in);
         if (inputActive || periodic || lastFrameAnimated || stateChanged) {
             frameMoving = false;
-            drawModalWifiKeyboard();
+            if (modalKind == ModalKind::Reader) drawModalReader();
+            else drawModalWifiKeyboard();
             lastFrameAnimated = frameMoving;
             canvas.pushSprite(0, Y_OFFSET);
         }
@@ -1026,6 +1028,15 @@ void Ui::handleInput(const InputState& in) {
                     lastFrameAnimated = true;
                     return;
                 }
+                if (n > 0 && (lower.endsWith(".txt") || lower.endsWith(".md") ||
+                              lower.endsWith(".log") || lower.endsWith(".pdf"))) {
+                    String full = path;
+                    if (!full.endsWith("/")) full += "/";
+                    full += e.name;
+                    openReader(root, full);
+                    lastFrameAnimated = true;
+                    return;
+                }
                 if (path != "/") {
                     int slash = path.substring(0, path.length() - 1).lastIndexOf('/');
                     path = slash > 0 ? path.substring(0, slash) : "/";
@@ -1125,6 +1136,19 @@ void Ui::handleFeatureInput(const InputState& in) {
 //  Modal: input — on-screen QWERTY / WebUI settings (logic unchanged)
 // =====================================================================
 void Ui::handleModalInput(const InputState& in) {
+    if (modalKind == ModalKind::Reader) {
+        // book navigation: rotation = smooth line scroll, click = page
+        // forward, hold = page back, Quit = exit (bookmark kept in NVS)
+        if (in.rotationSteps != 0)
+            readerCur = constrain((int)readerCur + in.rotationSteps, 0, (int)(readerLineCount - 1));
+        if (in.event == InputEvent::Click)
+            readerCur = constrain((int)readerCur + 12, 0, (int)(readerLineCount - 1));
+        if (in.event == InputEvent::LongPress)
+            readerCur = constrain((int)readerCur - 12, 0, (int)(readerLineCount - 1));
+        if (in.event == InputEvent::UserKey) closeReader();
+        lastFrameAnimated = true;
+        return;
+    }
     if (modalKind != ModalKind::WifiPassword) { focusLevel = FocusLevel::Field; modalKind = ModalKind::None; return; }
     // guard: without input there is nothing to do — saves a String per tick
     if (in.event == InputEvent::None && in.rotationSteps == 0) return;
@@ -1816,6 +1840,470 @@ void Ui::drawFilesScreen(int x0, int y0, int w, int h) {
         canvas.setTextColor(lastScriptResult.startsWith("OK") ? Theme::OK : Theme::ERR, Theme::BG);
         canvas.drawString(lastScriptResult, x0 + 12, y0 + h - 14);
     }
+}
+
+// =====================================================================
+//  Modal: File Reader — book view of .txt / .pdf opened from Files.
+//  TXT: UTF-8 or CP1251 (auto), Cyrillic transliterated to the display
+//  font. PDF: text harvested from content streams (FlateDecode streams
+//  are inflated with the ROM miniz) - Tj/TJ/'/"/<hex> strings, line
+//  breaks on Td/TD/T*/ET. Good enough for documentation PDFs; scanned
+//  or CID-font PDFs honestly report "no text extracted".
+//  Everything lives in PSRAM (text + line table), freed on close.
+//  Navigation: rotation = line scroll, click = page, hold = page back,
+//  Quit = exit. The position is bookmarked in NVS per file path.
+// =====================================================================
+namespace {
+    constexpr size_t RD_TEXT_CAP = 256 * 1024;
+    constexpr uint32_t RD_MAX_LINES = 16384;
+    constexpr int RD_COLS = 50;      // Font0 chars per body line
+    constexpr int RD_ROWS = 12;      // body lines per screen
+
+    bool rdIsUtf8(const uint8_t* p, size_t n) {
+        size_t i = 0;
+        while (i < n) {
+            uint8_t c = p[i];
+            if (c < 0x80) { i++; continue; }
+            if ((c & 0xE0) == 0xC0) { if (i + 1 >= n || (p[i + 1] & 0xC0) != 0x80) return false; i += 2; continue; }
+            if ((c & 0xF0) == 0xE0) { if (i + 2 >= n || (p[i + 1] & 0xC0) != 0x80 || (p[i + 2] & 0xC0) != 0x80) return false; i += 3; continue; }
+            if ((c & 0xF8) == 0xF0) { if (i + 3 >= n) return false; i += 4; continue; }
+            return false; // 0x80-0xBF or 0xFE/0xFF outside a sequence
+        }
+        return true;
+    }
+
+    // CP1251 -> UTF-8 (Cyrillic + quotes); ASCII passes through
+    size_t rdCp1251ToUtf8(const uint8_t* in, size_t n, char* out, size_t cap) {
+        size_t o = 0;
+        for (size_t i = 0; i < n && o + 2 < cap; i++) {
+            uint8_t b = in[i];
+            uint16_t cp = 0;
+            if (b < 0x80) { out[o++] = (char)b; continue; }
+            if (b == 0xA8) cp = 0x0401;
+            else if (b == 0xB8) cp = 0x0451;
+            else if (b >= 0xC0) cp = 0x0410 + (b - 0xC0);
+            if (!cp) { out[o++] = '?'; continue; }
+            out[o++] = (char)(0xC0 | (cp >> 6));
+            out[o++] = (char)(0x80 | (cp & 0x3F));
+        }
+        return o;
+    }
+
+    uint32_t rdPathHash(const char* s) {
+        uint32_t h = 2166136261u;
+        while (*s) { h ^= (uint8_t)*s++; h *= 16777619u; }
+        return h;
+    }
+
+    // zlib (PDF FlateDecode) -> dst via the ROM tinfl; false if over
+    // capacity or broken
+    bool rdInflate(const uint8_t* src, size_t srcLen, uint8_t* dst, size_t dstCap, size_t& outLen) {
+        size_t r = tinfl_decompress_mem_to_mem(dst, dstCap, src, srcLen, TINFL_FLAG_PARSE_ZLIB_HEADER);
+        if (r == TINFL_DECOMPRESS_MEM_TO_MEM_FAILED) return false;
+        outLen = r;
+        return true;
+    }
+
+    // harvest text tokens from a PDF content stream
+    void rdHarvestPdfText(const uint8_t* c, size_t n, char* out, size_t cap, size_t& o) {
+        for (size_t i = 0; i < n;) {
+            uint8_t ch = c[i];
+            if (ch == '(') { // literal string with escapes and nesting
+                i++;
+                int depth = 1;
+                while (i < n && o + 1 < cap) {
+                    uint8_t s = c[i++];
+                    if (s == '\\') {
+                        if (i >= n) break;
+                        uint8_t e = c[i++];
+                        if (e == 'n') out[o++] = '\n';
+                        else if (e == 't') out[o++] = ' ';
+                        else if (e == '(' || e == ')' || e == '\\') out[o++] = (char)e;
+                        else if (e >= '0' && e <= '7') {
+                            int v = e - '0';
+                            int k = 1;
+                            while (k < 3 && i < n && c[i] >= '0' && c[i] <= '7') { v = v * 8 + (c[i] - '0'); i++; k++; }
+                            if (v >= 32 && v < 127) out[o++] = (char)v;
+                            else if (v == 10) out[o++] = '\n';
+                        }
+                        continue;
+                    }
+                    if (s == '(') { depth++; out[o++] = '('; continue; }
+                    if (s == ')') { depth--; if (depth == 0) break; out[o++] = ')'; continue; }
+                    out[o++] = (char)s;
+                }
+                if (o < cap) out[o++] = ' ';
+                continue;
+            }
+            if (ch == '<' && i + 1 < n && isxdigit((int)c[i + 1]) && c[i + 1] != '<') { // hex string
+                i++;
+                bool pending = false;
+                uint8_t hi = 0;
+                while (i < n && o + 1 < cap) {
+                    uint8_t h = c[i];
+                    if (h == '>') { i++; break; }
+                    int v;
+                    if (h >= '0' && h <= '9') v = h - '0';
+                    else if (h >= 'a' && h <= 'f') v = h - 'a' + 10;
+                    else if (h >= 'A' && h <= 'F') v = h - 'A' + 10;
+                    else { i++; continue; }
+                    i++;
+                    if (!pending) { hi = (uint8_t)(v << 4); pending = true; }
+                    else {
+                        uint8_t b = hi | v;
+                        pending = false;
+                        if (b >= 32 && b < 127) out[o++] = (char)b;
+                    }
+                }
+                if (o < cap) out[o++] = ' ';
+                continue;
+            }
+            if (ch == 'T' && i + 1 < n && (c[i + 1] == 'd' || c[i + 1] == 'D' || c[i + 1] == '*')) {
+                if (o && out[o - 1] != '\n' && o + 1 < cap) out[o++] = '\n';
+                i += 2; continue;
+            }
+            if (ch == 'E' && i + 1 < n && c[i + 1] == 'T') {
+                if (o && out[o - 1] != '\n' && o + 1 < cap) out[o++] = '\n';
+                i += 2; continue;
+            }
+            if (ch == 'B' && i + 1 < n && c[i + 1] == 'T') {
+                if (o && out[o - 1] != '\n' && o + 1 < cap) out[o++] = '\n';
+                i += 2; continue;
+            }
+            i++;
+        }
+        if (o < cap) out[o] = 0;
+    }
+}
+
+void Ui::openReader(FsRoot root, const String& path) {
+    closeReader();
+    strncpy(readerPath, path.c_str(), sizeof(readerPath) - 1);
+    readerPath[sizeof(readerPath) - 1] = 0;
+    String lower = path; lower.toLowerCase();
+    readerPdf = lower.endsWith(".pdf");
+
+    if (!psramFound()) { modalKind = ModalKind::None; return; }
+    readerText = (char*)ps_malloc(RD_TEXT_CAP);
+    if (!readerText) { modalKind = ModalKind::None; return; }
+    readerText[0] = 0;
+    readerTextLen = 0;
+
+    fs::FS& fsRef = root == FsRoot::SD ? (fs::FS&)SD : (fs::FS&)LittleFS;
+
+    // ---- PDF: walk streams, inflate FlateDecode, harvest text ----
+    if (readerPdf) {
+        File f = fsRef.open(readerPath);
+        if (!f) { free(readerText); readerText = nullptr; return; }
+        uint8_t* scan = (uint8_t*)ps_malloc(32768);     // sliding scan window
+        uint8_t* streamBuf = (uint8_t*)ps_malloc(384 * 1024); // raw stream data
+        static uint8_t* infl = nullptr;                 // inflated content (cache)
+        static char* seg = nullptr;                     // harvest segment (cache)
+        if (!scan || !streamBuf) {
+            if (scan) free(scan);
+            if (streamBuf) free(streamBuf);
+            f.close();
+            free(readerText); readerText = nullptr;
+            return;
+        }
+
+        // static "PARSING" screen
+        canvas.fillSprite(Theme::BG);
+        canvas.setTextColor(Theme::ACCENT, Theme::BG);
+        canvas.drawString("PARSING PDF...", 10, 20);
+        canvas.setTextColor(Theme::TEXT_DIM, Theme::BG);
+        canvas.drawString(readerPath, 10, 36);
+        canvas.pushSprite(0, Y_OFFSET);
+
+        uint32_t fileLen = f.size();
+        uint32_t scanPos = 0;      // file offset of scan[0]
+        size_t scanFill = 0;       // valid bytes in scan[]
+        bool eof = false;
+        int streams = 0;
+
+        auto drawProgress = [&]() {
+            canvas.fillRect(0, 50, Theme::SCREEN_W, 16, Theme::BG);
+            char line[48];
+            snprintf(line, sizeof(line), "streams: %d   text: %lu KB", streams,
+                     (unsigned long)(readerTextLen / 1024));
+            canvas.setTextColor(Theme::TEXT, Theme::BG);
+            canvas.drawString(line, 10, 52);
+            canvas.pushSprite(0, Y_OFFSET);
+        };
+
+        while (readerTextLen < RD_TEXT_CAP - 4096 && !eof) {
+            // top up the scan window
+            if (scanFill < 32768 && f.position() < (long)fileLen) {
+                size_t want = 32768 - scanFill;
+                if ((uint32_t)(f.position() + want) > fileLen) want = fileLen - f.position();
+                size_t got = f.read(scan + scanFill, want);
+                scanFill += got;
+                if (f.position() >= (long)fileLen) eof = true;
+            } else if (scanFill < 8) break;
+
+            // find "stream" (not "endstream")
+            int hit = -1;
+            for (size_t i = 8; i + 6 <= scanFill; i++) {
+                if (memcmp(scan + i, "stream", 6) == 0 &&
+                    !(i >= 3 && memcmp(scan + i - 3, "end", 3) == 0)) { hit = (int)i; break; }
+            }
+            if (hit < 0) {
+                // keep a small tail for boundary crossings
+                size_t keep = 64;
+                if (scanFill > keep) {
+                    memmove(scan, scan + scanFill - keep, keep);
+                    scanPos += scanFill - keep;
+                    scanFill = keep;
+                } else if (eof) break;
+                continue;
+            }
+
+            // dict before the keyword
+            size_t dictStart = hit > 320 ? hit - 320 : 0;
+            size_t dictLen = hit - dictStart;
+            bool flate = false, skip = false;
+            for (size_t i = dictStart; i + 12 < dictStart + dictLen; i++) {
+                if (memcmp(scan + i, "FlateDecode", 11) == 0) flate = true;
+                if (memcmp(scan + i, "/Image", 6) == 0) skip = true;
+                if (memcmp(scan + i, "Length1", 7) == 0) skip = true; // embedded font
+            }
+
+            // data start after "stream" + EOL
+            long dataFilePos = (long)(scanPos + hit + 6);
+            if (hit + 6 < (int)scanFill && scan[hit + 6] == '\r') dataFilePos++;
+            if (hit + 6 < (int)scanFill && scan[hit + 6 + ((scan[hit + 6] == '\r') ? 1 : 0)] == '\n') dataFilePos++;
+
+            // find "endstream" forward via seeks
+            long endPos = -1;
+            uint32_t streamLen = 0;
+            f.seek(dataFilePos);
+            uint8_t endBuf[512];
+            long p = dataFilePos;
+            while (p < (long)fileLen && streamLen < 384 * 1024) {
+                size_t got = f.read(endBuf, sizeof(endBuf));
+                if (!got) break;
+                for (size_t i = 0; i + 9 <= got; i++) {
+                    if (memcmp(endBuf + i, "endstream", 9) == 0) { endPos = p + (long)i; break; }
+                }
+                if (endPos >= 0) break;
+                p += got;
+                streamLen += got;
+            }
+            if (endPos < 0) { // malformed tail
+                scanPos = fileLen; scanFill = 0; break;
+            }
+            streamLen = (uint32_t)(endPos - dataFilePos);
+            if (streamLen > 384 * 1024) streamLen = 384 * 1024;
+
+            // read the raw stream
+            f.seek(dataFilePos);
+            size_t rawLen = f.read(streamBuf, streamLen);
+
+            if (!skip && rawLen > 0) {
+                const uint8_t* content = streamBuf;
+                size_t contentLen = rawLen;
+                if (flate) {
+                    if (!infl) infl = (uint8_t*)ps_malloc(192 * 1024);
+                    size_t inflLen = 0;
+                    if (infl && rdInflate(streamBuf, rawLen, infl, 192 * 1024, inflLen)) {
+                        content = infl;
+                        contentLen = inflLen;
+                    } else { content = nullptr; }
+                }
+                if (content) {
+                    // harvest into a temp segment, keep if mostly printable
+                    if (!seg) seg = (char*)ps_malloc(64 * 1024);
+                    if (seg) {
+                        size_t so = 0;
+                        seg[0] = 0;
+                        rdHarvestPdfText(content, contentLen, seg, 64 * 1024 - 1, so);
+                        uint32_t printable = 0;
+                        for (size_t i = 0; i < so; i++) {
+                            uint8_t ch = (uint8_t)seg[i];
+                            if (ch == '\n' || ch == ' ' || (ch >= 0x20 && ch < 0x7F)) printable++;
+                        }
+                        if (so > 16 && printable * 100 > so * 60 && readerTextLen + so < RD_TEXT_CAP - 2048) {
+                            memcpy(readerText + readerTextLen, seg, so);
+                            readerTextLen += so;
+                            if (readerText[readerTextLen - 1] != '\n' && readerTextLen < RD_TEXT_CAP - 2)
+                                readerText[readerTextLen++] = '\n';
+                        }
+                    }
+                }
+            }
+            streams++;
+            if (streams % 4 == 0) drawProgress();
+
+            // resume scanning after endstream
+            long next = endPos + 9;
+            f.seek(next);
+            scanPos = (uint32_t)next;
+            scanFill = 0;
+            eof = f.position() >= (long)fileLen;
+        }
+        if (infl) { free(infl); infl = nullptr; }
+        if (seg) { free(seg); seg = nullptr; }
+        free(streamBuf);
+        free(scan);
+        f.close();
+        readerText[readerTextLen] = 0;
+        if (readerTextLen < 32) { // nothing usable (scanned / CID-font PDF)
+            const char* msg = "No text extracted (scanned or CID-font PDF?)";
+            strncpy(readerText, msg, RD_TEXT_CAP - 1);
+            readerTextLen = strlen(msg);
+        } else if (readerTextLen >= RD_TEXT_CAP - 2048) {
+            const char* note = "\n...(truncated at 256 KB)";
+            size_t nl = strlen(note);
+            if (readerTextLen + nl < RD_TEXT_CAP - 1) {
+                memcpy(readerText + readerTextLen, note, nl);
+                readerTextLen += nl;
+            }
+        }
+    } else {
+        // ---- TXT: UTF-8 or CP1251, transliterated to the display font ----
+        File f = fsRef.open(readerPath);
+        if (!f) { free(readerText); readerText = nullptr; return; }
+        static char* conv = nullptr; // chunk conversion scratch (SPIRAM)
+        if (!conv) conv = (char*)ps_malloc(16384);
+        if (!conv) { f.close(); free(readerText); readerText = nullptr; return; }
+
+        uint8_t chunk[4096];
+        bool first = true;
+        bool isUtf8 = true;
+        while (readerTextLen < RD_TEXT_CAP - 8192) {
+            size_t got = f.read(chunk, sizeof(chunk));
+            if (!got) break;
+            if (first) { isUtf8 = rdIsUtf8(chunk, got); first = false; readerCp1251 = !isUtf8; }
+            size_t add = 0;
+            if (isUtf8) {
+                String s;
+                s.reserve(got + 1);
+                s.concat((const char*)chunk, got);
+                translitToBuf(s, conv, 16383);
+                add = strlen(conv);
+            } else {
+                size_t u8 = rdCp1251ToUtf8(chunk, got, conv, 16383);
+                conv[u8] = 0;
+                String s; s.reserve(u8 + 1); s.concat(conv, u8);
+                translitToBuf(s, conv, 16383);
+                add = strlen(conv);
+            }
+            if (readerTextLen + add >= RD_TEXT_CAP - 8) break;
+            memcpy(readerText + readerTextLen, conv, add);
+            readerTextLen += add;
+        }
+        conv[0] = 0;
+        readerText[readerTextLen] = 0;
+        f.close();
+        if (readerTextLen >= RD_TEXT_CAP - 8192) {
+            const char* note = "\n...(file truncated at 256 KB)";
+            size_t nl = strlen(note);
+            memcpy(readerText + readerTextLen, note, nl + 1);
+            readerTextLen += nl;
+        }
+    }
+
+    // ---- wrap into display lines ----
+    readerLines = (uint32_t*)ps_malloc(RD_MAX_LINES * sizeof(uint32_t));
+    if (!readerLines) { free(readerText); readerText = nullptr; return; }
+    readerLineCount = 0;
+    {
+        uint32_t pos = 0;
+        while (pos < readerTextLen && readerLineCount < RD_MAX_LINES) {
+            readerLines[readerLineCount++] = pos;
+            uint32_t col = 0, brk = 0;
+            bool sawSpace = false;
+            while (pos < readerTextLen) {
+                char ch = readerText[pos];
+                if (ch == '\n') { pos++; break; }
+                if (col >= RD_COLS) {
+                    // wrap at the last space so words stay whole
+                    if (brk > readerLines[readerLineCount - 1] && sawSpace) pos = brk;
+                    break;
+                }
+                if (ch == ' ') { sawSpace = true; brk = pos; }
+                pos++;
+                col++;
+            }
+        }
+    }
+    if (readerLineCount == 0) { closeReader(); return; }
+
+    // ---- bookmark restore (NVS, per path) ----
+    char key[16];
+    snprintf(key, sizeof(key), "bm_%08X", (unsigned)rdPathHash(readerPath));
+    int saved = Config::getInt(key, 0);
+    readerCur = (saved > 0 && (uint32_t)saved < readerLineCount) ? (uint32_t)saved : 0;
+
+    modalKind = ModalKind::Reader;
+    focusLevel = FocusLevel::Modal;
+    frameMoving = true;
+    lastFrameAnimated = true;
+}
+
+void Ui::closeReader() {
+    if (modalKind == ModalKind::Reader && readerPath[0]) {
+        // persist the bookmark FIRST (readerCur is zeroed below)
+        char key[16];
+        snprintf(key, sizeof(key), "bm_%08X", (unsigned)rdPathHash(readerPath));
+        Config::setInt(key, (int)readerCur);
+    }
+    if (readerText) { free(readerText); readerText = nullptr; }
+    if (readerLines) { free(readerLines); readerLines = nullptr; }
+    readerTextLen = 0;
+    readerLineCount = 0;
+    readerCur = 0;
+    if (modalKind == ModalKind::Reader) {
+        modalKind = ModalKind::None;
+        focusLevel = FocusLevel::Field;
+        frameMoving = true;
+    }
+    readerPath[0] = 0;
+}
+
+void Ui::drawModalReader() {
+    canvas.fillSprite(Theme::BG);
+    canvas.setFont(&fonts::Font0);
+    canvas.setTextSize(Theme::SIZE_TEXT);
+    canvas.setTextDatum(textdatum_t::top_left);
+
+    // title: file name (after the last slash), transliterated
+    const char* base = strrchr(readerPath, '/');
+    base = base ? base + 1 : readerPath;
+    canvas.setTextColor(Theme::ACCENT, Theme::BG);
+    canvas.drawString(base, 8, 2);
+
+    if (!readerText || readerLineCount == 0) return;
+
+    // body lines
+    canvas.setTextColor(Theme::TEXT, Theme::BG);
+    char line[RD_COLS + 2];
+    for (int i = 0; i < RD_ROWS && readerCur + i < readerLineCount; i++) {
+        uint32_t start = readerLines[readerCur + i];
+        uint32_t end = (readerCur + i + 1 < readerLineCount) ? readerLines[readerCur + i + 1]
+                                                             : readerTextLen;
+        uint32_t len = end - start;
+        if (len && readerText[start + len - 1] == '\n') len--;
+        if (len > RD_COLS) len = RD_COLS;
+        memcpy(line, readerText + start, len);
+        line[len] = 0;
+        canvas.drawString(line, 8, 14 + i * 10);
+    }
+
+    // progress
+    int pct = (int)(readerCur * 100 / (readerLineCount ? readerLineCount - 1 : 1));
+    canvas.drawRect(8, Theme::SCREEN_H - 14, Theme::SCREEN_W - 16, 5, Theme::TEXT_DIM);
+    canvas.fillRect(8, Theme::SCREEN_H - 14, (Theme::SCREEN_W - 16) * pct / 100, 5, Theme::ACCENT);
+    canvas.setTextColor(Theme::TEXT_FAINT, Theme::BG);
+    char pb[48];
+    snprintf(pb, sizeof(pb), "%lu/%lu  %d%%  %s", (unsigned long)(readerCur + 1),
+             (unsigned long)readerLineCount, pct, readerPdf ? "PDF" : (readerCp1251 ? "TXT cp1251" : "TXT"));
+    canvas.drawString(pb, 8, Theme::SCREEN_H - 8);
+
+    canvas.setTextColor(Theme::TEXT_FAINT, Theme::BG);
+    canvas.setTextDatum(textdatum_t::top_right);
+    canvas.drawString("quit: bookmark+exit", Theme::SCREEN_W - 8, Theme::SCREEN_H - 8);
+    canvas.setTextDatum(textdatum_t::top_left);
 }
 
 // =====================================================================
