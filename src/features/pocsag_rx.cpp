@@ -131,18 +131,33 @@ namespace {
         }
     }
 
-    // one sampling pass (~1.47 s), paced by micros()
-    void samplePass() {
-        rawN = 0;
-        uint32_t nextUs = micros();
-        const uint32_t bitUs = 833; // 1200 bps
-        while (rawN < BITS) {
-            while ((int32_t)(micros() - nextUs) < 0) {}
-            nextUs += bitUs;
-            if (rawN % 8 == 0) rawBits[rawN / 8] = 0;
-            if (digitalRead(PIN_CC1101_GDO2)) rawBits[rawN / 8] |= (0x80 >> (rawN % 8));
-            rawN++;
-        }
+    // ---- sampling via esp_timer (1200 Hz bit sampler) ----
+    // Was: a 1.47 s busy-wait loop per tick - the whole UI froze every
+    // pass. Now a periodic esp_timer samples GDO2 in the background and
+    // tick() only decodes when a buffer is ready. Zero UI blocking.
+    volatile bool sampReady = false;
+    esp_timer_handle_t sampTimer = nullptr;
+
+    void IRAM_ATTR sampCb(void*) {
+        if (rawN >= BITS) { sampReady = true; return; }
+        if (rawN % 8 == 0) rawBits[rawN / 8] = 0;
+        if (digitalRead(PIN_CC1101_GDO2)) rawBits[rawN / 8] |= (0x80 >> (rawN % 8));
+        rawN++;
+    }
+
+    bool samplerStart() {
+        if (sampTimer) return true;
+        esp_timer_create_args_t cfg = {};
+        cfg.callback = &sampCb;
+        cfg.name = "pocsag";
+        if (esp_timer_create(&cfg, &sampTimer) != ESP_OK) return false;
+        esp_timer_start_periodic(sampTimer, 833); // 1200 bps
+        return true;
+    }
+
+    void samplerStop() {
+        if (sampTimer) { esp_timer_stop(sampTimer); esp_timer_delete(sampTimer); sampTimer = nullptr; }
+        sampReady = false;
     }
 
     void draw(LGFX_Sprite& c, int x0, int y0, int w, int h) {
@@ -190,10 +205,14 @@ namespace {
             if (!SubGhz::isReady()) return true;
             if (monitoring) {
                 monitoring = false;
+                samplerStop();
                 restoreDefaults();
             } else {
                 setupFsk();
                 pinMode(PIN_CC1101_GDO2, INPUT);
+                rawN = 0;
+                sampReady = false;
+                if (!samplerStart()) { snprintf(statusMsg, sizeof(statusMsg), "sampler failed"); Features::requestRedraw(); return true; }
                 monitoring = true;
             }
             Features::requestRedraw();
@@ -217,12 +236,16 @@ namespace {
 
     void tick() {
         if (!monitoring) return;
-        samplePass();
+        if (!sampReady || rawN < BITS) return;
         decode();
+        rawN = 0;
+        sampReady = false;
         Features::requestRedraw();
     }
 
-    void onExit() { if (monitoring) { monitoring = false; restoreDefaults(); } }
+    void onExit() {
+        if (monitoring) { monitoring = false; samplerStop(); restoreDefaults(); }
+    }
 }
 
 REGISTER_FEATURE("POCSAG RX", MwCat::SubGhz, MwIcon::Terminal, 40,

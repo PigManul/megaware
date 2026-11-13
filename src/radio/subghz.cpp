@@ -214,6 +214,11 @@ namespace {
         { 314.00f, 0.05f, 41 },  // 315
         { 902.00f, 0.20f, 66 },  // 915
     };
+
+    // sliced sweep: ~20 channels per call (~20 ms) so the web sweep
+    // never stalls the main loop; lastUpdateMs is stamped when a full
+    // pass completes (the browser checks age against it)
+    int sweepIdx = 0;
 }
 
 SubGhz::SpectrumData& SubGhz::sharedSpectrum() { return spectrum; }
@@ -231,12 +236,15 @@ bool SubGhz::webSpectrumActive() { return webSweepBand >= 0; }
 void SubGhz::sweepOnce() {
     SpectrumData& s = spectrum;
     if (!ready || s.count <= 0) return;
-    for (int i = 0; i < s.count; i++) {
-        setFrequency(s.startMHz + i * s.stepMHz);
+    for (int k = 0; k < 20 && sweepIdx < s.count; k++, sweepIdx++) {
+        setFrequency(s.startMHz + sweepIdx * s.stepMHz);
         delayMicroseconds(800); // на settling синтезатора CC1101
-        s.dbm[i] = readRssiDbm();
+        s.dbm[sweepIdx] = readRssiDbm();
     }
-    s.lastUpdateMs = millis();
+    if (sweepIdx >= s.count) {
+        sweepIdx = 0;
+        s.lastUpdateMs = millis(); // полная развёртка готова
+    }
 }
 
 bool SubGhz::transmitFile(const String& path) {

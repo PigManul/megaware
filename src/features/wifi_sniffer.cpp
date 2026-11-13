@@ -216,44 +216,47 @@ namespace {
             c.drawString("click: start (ch 1)", x0 + 10, y0 + 44);
             return;
         }
-        char line[48];
+        char line[64];
+        int y = y0 + 22;
         snprintf(line, sizeof(line), "ch %d  %lu pkt/s", channel, (unsigned long)pktPerSec);
         c.setTextColor(Theme::ACCENT, Theme::BG);
-        c.drawString(line, x0 + 10, y0 + 24);
+        c.drawString(line, x0 + 10, y); y += 12;
         snprintf(line, sizeof(line), "total %lu  mgmt %lu  data %lu",
                  (unsigned long)totalPkts, (unsigned long)beaconPkts, (unsigned long)dataPkts);
         c.setTextColor(Theme::TEXT_DIM, Theme::BG);
-        c.drawString(line, x0 + 10, y0 + 42);
+        c.drawString(line, x0 + 10, y); y += 12;
         if (osDetected) {
             snprintf(line, sizeof(line), "OS: %s (DHCP)", osDetected);
             c.setTextColor(Theme::WARN, Theme::BG);
-            c.drawString(line, x0 + 10, y0 + 58);
+            c.drawString(line, x0 + 10, y); y += 12;
         }
-        // QoS по Access Categories
-        if (qosFrames > 0) {
-            int qy = y0 + (osDetected ? 76 : 58);
+        if (qosFrames > 0) { // one compact line instead of a 4-row block
+            snprintf(line, sizeof(line), "QoS VO %lu VI %lu BE %lu BK %lu",
+                     (unsigned long)acCount[0], (unsigned long)acCount[1],
+                     (unsigned long)acCount[2], (unsigned long)acCount[3]);
             c.setTextColor(Theme::TEXT, Theme::BG);
-            c.drawString("QoS:", x0 + 10, qy);
-            for (int i = 0; i < 4; i++) {
-                snprintf(line, sizeof(line), "%s %lu", AC_NAMES[i], (unsigned long)acCount[i]);
-                c.setTextColor(i == 0 ? Theme::WARN : Theme::TEXT_DIM, Theme::BG);
-                c.drawString(line, x0 + 48, qy + 4 + (3 - i) * 14);
-            }
+            c.drawString(line, x0 + 10, y); y += 12;
         }
-
-        // новые MAC-и (последние 5)
-        int show = macCount < 5 ? macCount : 5;
-        c.setTextColor(Theme::TEXT_FAINT, Theme::BG);
-        c.drawString("devices seen:", x0 + 10, y0 + 66);
-        for (int i = 0; i < show; i++) {
-            c.setTextColor(Theme::TEXT_DIM, Theme::BG);
-            c.drawString(macNames[macCount - show + i], x0 + 20, y0 + 82 + i * Theme::ROW_LIST);
+        // devices list takes the rest of the screen (no overlap)
+        int show = macCount;
+        int room = (y0 + h - 26 - y) / Theme::ROW_LIST;
+        if (show > room) show = room;
+        if (show > 0) {
+            c.setTextColor(Theme::TEXT_FAINT, Theme::BG);
+            c.drawString("devices seen:", x0 + 10, y); y += 12;
+            int start = macCount - show;
+            if (start < 0) start = 0;
+            for (int i = start; i < macCount; i++) {
+                c.setTextColor(Theme::TEXT_DIM, Theme::BG);
+                c.drawString(macNames[i], x0 + 20, y);
+                y += Theme::ROW_LIST;
+            }
         }
         if (deauthCount > 0) {
             char ids[40];
-            snprintf(ids, sizeof(ids), "⚠ DEAUTH DETECTED: %lu", (unsigned long)deauthCount);
+            snprintf(ids, sizeof(ids), "DEAUTH DETECTED: %lu", (unsigned long)deauthCount);
             c.setTextColor(Theme::ERR, Theme::BG);
-            c.drawString(ids, x0 + 10, y0 + h - 28);
+            c.drawString(ids, x0 + 10, y0 + h - 26);
         }
         c.setTextColor(Theme::TEXT_FAINT, Theme::BG);
         c.drawString("rot: channel  click: stop", x0 + 10, y0 + h - 14);

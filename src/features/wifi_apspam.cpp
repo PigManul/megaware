@@ -20,6 +20,8 @@ namespace {
     Mode mode = RandomNames;
     bool spamming = false;
     uint32_t sent = 0;
+    uint8_t spamCh = 1;           // rotating channel, one per tick
+    char errMsg[48] = "";         // first esp_wifi error surfaced honestly
 
     // список из файла: до 32 SSID по 32 символа
     char listSsids[32][33];
@@ -59,7 +61,8 @@ namespace {
 
     // beacon: FC(2) dur(2) DA(6) SA(6) BSS(6) seq(2) | ts(8) int(2) cap(2) | IEs
     // worst case 36 + 2 + 32 (SSID) + 10 (rates) + 3 (DS) = 83 — 96 gives headroom
-    void sendBeacon(const char* ssid, uint8_t ch) {
+    // returns the esp_wifi error code (ESP_OK on success)
+    esp_err_t sendBeacon(const char* ssid, uint8_t ch) {
         uint8_t pkt[96];
         memset(pkt, 0, sizeof(pkt));
         pkt[0] = 0x80; pkt[1] = 0x00;                 // beacon, no flags
@@ -82,23 +85,7 @@ namespace {
         pkt[p++] = 0x82; pkt[p++] = 0x84; pkt[p++] = 0x8B; pkt[p++] = 0x96;
         pkt[p++] = 0x24; pkt[p++] = 0x30; pkt[p++] = 0x48; pkt[p++] = 0x6C;
         pkt[p++] = 0x03; pkt[p++] = 0x01; pkt[p++] = ch; // DS param: channel
-        esp_wifi_80211_tx(WIFI_IF_AP, pkt, p, false);
-    }
-
-    void spamBurst(int count) {
-        for (int i = 0; i < count; i++) {
-            char ssid[33];
-            if (mode == FromFile && listCount_ > 0) {
-                snprintf(ssid, sizeof(ssid), "%s", listSsids[listIdx % listCount_]);
-                listIdx++;
-            } else {
-                genRandomSsid(ssid);
-            }
-            uint8_t ch = 1 + (rnd() % 13);
-            esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
-            sendBeacon(ssid, ch);
-            sent++;
-        }
+        return esp_wifi_80211_tx(WIFI_IF_AP, pkt, p, false);
     }
 
     void draw(LGFX_Sprite& c, int x0, int y0, int w, int h) {
@@ -119,7 +106,12 @@ namespace {
         c.setTextColor(Theme::TEXT_DIM, Theme::BG);
         c.drawString(line, x0 + 10, y0 + 58);
         c.setTextColor(spamming ? Theme::ACCENT : Theme::TEXT_FAINT, Theme::BG);
-        c.drawString(spamming ? "SPAMMING..." : "idle", x0 + 10, y0 + 74);
+        snprintf(line, sizeof(line), "%s (ch %d)", spamming ? "SPAMMING..." : "idle", spamCh);
+        c.drawString(line, x0 + 10, y0 + 74);
+        if (errMsg[0]) {
+            c.setTextColor(Theme::ERR, Theme::BG);
+            c.drawString(errMsg, x0 + 10, y0 + 88);
+        }
         c.setTextColor(Theme::TEXT_FAINT, Theme::BG);
         c.drawString("click: start/stop   rotate: source", x0 + 10, y0 + h - 14);
     }
@@ -154,7 +146,29 @@ namespace {
 
     void tick() {
         if (!spamming) return;
-        spamBurst(20); // 20 фейковых точек за тик
+        // ONE channel per tick: esp_wifi_set_channel is slow and the
+        // per-beacon hopping made it the likely failure point. Rotating
+        // 13 channels at ~10 ms each covers the whole band in ~2 s.
+        // First esp_wifi error is surfaced on screen instead of failing
+        // silently (phones showed nothing and there was no diagnosis).
+        uint8_t ch = spamCh;
+        spamCh = spamCh < 13 ? spamCh + 1 : 1;
+        esp_err_t rc = esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+        if (rc != ESP_OK && !errMsg[0])
+            snprintf(errMsg, sizeof(errMsg), "set_channel %d: %s", ch, esp_err_to_name(rc));
+        for (int i = 0; i < 8; i++) {
+            char ssid[33];
+            if (mode == FromFile && listCount_ > 0) {
+                snprintf(ssid, sizeof(ssid), "%s", listSsids[listIdx % listCount_]);
+                listIdx++;
+            } else {
+                genRandomSsid(ssid);
+            }
+            rc = sendBeacon(ssid, ch);
+            if (rc != ESP_OK && !errMsg[0])
+                snprintf(errMsg, sizeof(errMsg), "tx: %s", esp_err_to_name(rc));
+            sent++;
+        }
         static uint32_t lastUi = 0;
         if (millis() - lastUi > 300) { lastUi = millis(); Features::requestRedraw(); }
     }

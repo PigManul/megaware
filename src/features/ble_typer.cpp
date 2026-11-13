@@ -210,16 +210,20 @@ namespace {
 
     void tick() {
         if (state != Typing) return;
-        // ~10 characters per tick (12 ms each) — hosts don't lose characters
-        for (int i = 0; i < 10 && typed < total; i++) {
-            char ch = typeBuf[typed];
-            if (ch == '\n') kb.write(KEY_RETURN);
-            else if (ch == '\t') kb.write(KEY_TAB);
-            else kb.write(ch);
-            typed++;
-            delay(12);
+        // one character per 12 ms via millis pacing - hosts drop chars
+        // when hammered; a blocking delay(12) x 10 per tick froze the UI
+        if (typed < total) {
+            static uint32_t lastCharAt = 0;
+            if (millis() - lastCharAt >= 12) {
+                lastCharAt = millis();
+                char ch = typeBuf[typed];
+                if (ch == '\n') kb.write(KEY_RETURN);
+                else if (ch == '\t') kb.write(KEY_TAB);
+                else kb.write(ch);
+                typed++;
+                Features::requestRedraw();
+            }
         }
-        Features::requestRedraw();
         if (typed >= total) {
             kb.releaseAll();
             state = List;

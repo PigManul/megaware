@@ -1573,7 +1573,11 @@ namespace {
 
     // PN532 via Nfc::ensure() (RST pulse + init — not a bare probe)
     bool pn532Probe() {
-        return Nfc::ensure();
+        // probe once per boot: Nfc::ensure() does I2C traffic + an RST
+        // pulse, and the About screen used to call it twice PER FRAME
+        static int8_t cached = -1;
+        if (cached < 0) cached = Nfc::ensure() ? 1 : 0;
+        return cached == 1;
     }
 }
 
@@ -2345,15 +2349,26 @@ void Ui::drawModalWifiKeyboard() {
     // password row: mask or plain text (TXT) + character counter
     canvas.setTextDatum(textdatum_t::middle_left);
     canvas.setTextColor(Theme::TEXT, Theme::BG);
-    String shown;
-    if (kbShowPlain) shown = pwBuffer;
-    else {
-        shown.reserve(pwBuffer.length());
-        for (uint32_t i = 0; i < pwBuffer.length(); i++) shown += '*';
+    static char shown[96]; // no String per redraw (frame-rate path)
+    if (kbShowPlain) {
+        size_t n = pwBuffer.length();
+        if (n > 94) n = 94;
+        memcpy(shown, pwBuffer.c_str(), n);
+        shown[n] = 0;
+    } else {
+        size_t n = pwBuffer.length();
+        if (n > 90) n = 90;
+        memset(shown, '*', n);
+        shown[n] = 0;
     }
     if (canvas.textWidth(shown) > 250) {
-        shown = "..." + shown; // truncate the content part, "..." stays at the front
-        while (shown.length() > 4 && canvas.textWidth(shown) > 250) shown.remove(1, 1);
+        // keep the tail: shift content right behind "..."
+        memmove(shown + 3, shown, strlen(shown) + 1);
+        shown[0] = '.'; shown[1] = '.'; shown[2] = '.';
+        while (strlen(shown) > 4 && canvas.textWidth(shown) > 250) {
+            size_t l = strlen(shown);
+            memmove(shown + 3, shown + 4, l - 4 + 1); // drop one masked char
+        }
     }
     canvas.drawString(shown, 26, 25);
     canvas.drawFastHLine(20, 34, 280, Theme::TEXT_DIM);
