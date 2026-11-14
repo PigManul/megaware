@@ -20,7 +20,8 @@ namespace {
     Mode mode = RandomNames;
     bool spamming = false;
     uint32_t sent = 0;
-    uint8_t spamCh = 1;           // rotating channel, one per tick
+    uint8_t spamCh = 1;           // rotating channel, one per tick (free-radio mode)
+    bool wifiBusy = false;        // spamming on the current channel, radio untouched
     char errMsg[48] = "";         // first esp_wifi error surfaced honestly
 
     // список из файла: до 32 SSID по 32 символа
@@ -108,7 +109,11 @@ namespace {
         c.setTextColor(Theme::TEXT_DIM, Theme::BG);
         c.drawString(line, x0 + 10, y0 + 58);
         c.setTextColor(spamming ? Theme::ACCENT : Theme::TEXT_FAINT, Theme::BG);
-        snprintf(line, sizeof(line), "%s (ch %d)", spamming ? "SPAMMING..." : "idle", spamCh);
+        if (spamming && wifiBusy) {
+            snprintf(line, sizeof(line), "SPAMMING... (fixed ch %d, Wi-Fi up)", WiFi.channel() ? WiFi.channel() : 1);
+        } else {
+            snprintf(line, sizeof(line), "%s (ch %d)", spamming ? "SPAMMING..." : "idle", spamCh);
+        }
         c.drawString(line, x0 + 10, y0 + 74);
         if (errMsg[0]) {
             c.setTextColor(Theme::ERR, Theme::BG);
@@ -134,22 +139,23 @@ namespace {
                     Features::requestRedraw();
                     return true; // нечего спамить
                 }
-                // channel hopping needs a FREE radio: a running AP pins
-                // the channel (set_channel failed on it before), and a
-                // connected STA would drop the link on every hop
-                if (WifiMgr::isConnected() || WifiMgr::isAPRunning()) {
-                    snprintf(errMsg, sizeof(errMsg), "disconnect Wi-Fi first");
-                    Features::requestRedraw();
-                    return true;
-                }
                 errMsg[0] = 0;
-                // STA mode, not connected, promiscuous - the Maruder
-                // recipe: only in this state does set_channel succeed
-                WiFi.mode(WIFI_STA);
-                WiFi.disconnect();
-                delay(50);
+                // Two modes:
+                //  - Wi-Fi busy (STA connected / AP up): spam on the
+                //    CURRENT channel, radio untouched - internet and
+                //    WebUI keep working (phones scan every channel and
+                //    will see the fakes).
+                //  - Radio free: Maruder recipe - STA not connected +
+                //    promiscuous, hop 1..13 (set_channel only succeeds
+                //    in this state).
+                wifiBusy = WifiMgr::isConnected() || WifiMgr::isAPRunning();
+                if (!wifiBusy) {
+                    WiFi.mode(WIFI_STA);
+                    WiFi.disconnect();
+                    delay(50);
+                    spamCh = 1;
+                }
                 esp_wifi_set_promiscuous(true);
-                spamCh = 1;
                 spamming = true;
                 sent = 0;
             }
@@ -161,28 +167,46 @@ namespace {
 
     void tick() {
         if (!spamming) return;
-        // ONE channel per tick: esp_wifi_set_channel is slow and the
-        // per-beacon hopping made it the likely failure point. Rotating
-        // 13 channels at ~10 ms each covers the whole band in ~2 s.
-        // First esp_wifi error is surfaced on screen instead of failing
-        // silently (phones showed nothing and there was no diagnosis).
-        uint8_t ch = spamCh;
-        spamCh = spamCh < 13 ? spamCh + 1 : 1;
-        esp_err_t rc = esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
-        if (rc != ESP_OK && !errMsg[0])
-            snprintf(errMsg, sizeof(errMsg), "set_channel %d: %s", ch, esp_err_to_name(rc));
-        for (int i = 0; i < 8; i++) {
-            char ssid[33];
-            if (mode == FromFile && listCount_ > 0) {
-                snprintf(ssid, sizeof(ssid), "%s", listSsids[listIdx % listCount_]);
-                listIdx++;
-            } else {
-                genRandomSsid(ssid);
+        if (wifiBusy) {
+            // fixed channel = the radio's own one; never touch
+            // esp_wifi_set_channel (it failed with an interface up)
+            uint8_t ch = WiFi.channel();
+            if (!ch) ch = 1;
+            for (int i = 0; i < 8; i++) {
+                char ssid[33];
+                if (mode == FromFile && listCount_ > 0) {
+                    snprintf(ssid, sizeof(ssid), "%s", listSsids[listIdx % listCount_]);
+                    listIdx++;
+                } else {
+                    genRandomSsid(ssid);
+                }
+                esp_err_t rc = sendBeacon(ssid, ch);
+                if (rc != ESP_OK && !errMsg[0])
+                    snprintf(errMsg, sizeof(errMsg), "tx: %s", esp_err_to_name(rc));
+                sent++;
             }
-            rc = sendBeacon(ssid, ch);
+        } else {
+            // hopping: ONE channel per tick, whole band in ~2 s. First
+            // esp_wifi error is surfaced on screen instead of failing
+            // silently.
+            uint8_t ch = spamCh;
+            spamCh = spamCh < 13 ? spamCh + 1 : 1;
+            esp_err_t rc = esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
             if (rc != ESP_OK && !errMsg[0])
-                snprintf(errMsg, sizeof(errMsg), "tx: %s", esp_err_to_name(rc));
-            sent++;
+                snprintf(errMsg, sizeof(errMsg), "set_channel %d: %s", ch, esp_err_to_name(rc));
+            for (int i = 0; i < 8; i++) {
+                char ssid[33];
+                if (mode == FromFile && listCount_ > 0) {
+                    snprintf(ssid, sizeof(ssid), "%s", listSsids[listIdx % listCount_]);
+                    listIdx++;
+                } else {
+                    genRandomSsid(ssid);
+                }
+                rc = sendBeacon(ssid, ch);
+                if (rc != ESP_OK && !errMsg[0])
+                    snprintf(errMsg, sizeof(errMsg), "tx: %s", esp_err_to_name(rc));
+                sent++;
+            }
         }
         static uint32_t lastUi = 0;
         if (millis() - lastUi > 300) { lastUi = millis(); Features::requestRedraw(); }
