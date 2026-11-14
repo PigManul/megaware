@@ -87,8 +87,16 @@ namespace {
         pkt[p++] = 0x03; pkt[p++] = 0x01; pkt[p++] = ch; // DS param: channel
         // Maruder-style: the STA interface carries raw injection - the
         // AP interface pins the radio to its own channel and
-        // esp_wifi_set_channel fails while it is up
-        return esp_wifi_80211_tx(WIFI_IF_STA, pkt, p, false);
+        // esp_wifi_set_channel fails while it is up. The FIRST frame
+        // after enabling promiscuous usually hits ESP_ERR_NO_MEM (the
+        // raw TX queue is not up yet) - retry with a micro-pause.
+        for (int attempt = 0; attempt < 4; attempt++) {
+            esp_err_t rc = esp_wifi_80211_tx(WIFI_IF_STA, pkt, p, false);
+            if (rc == ESP_OK) return ESP_OK;
+            if (rc != ESP_ERR_NO_MEM) return rc;
+            delayMicroseconds(1500);
+        }
+        return ESP_ERR_NO_MEM;
     }
 
     void draw(LGFX_Sprite& c, int x0, int y0, int w, int h) {
