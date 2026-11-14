@@ -27,4 +27,20 @@ namespace Ir {
     bool sendValue(const String& proto, uint64_t value, uint16_t bits);
     bool sendRaw(uint32_t hz, const uint16_t* timingsUs, int len);
     bool transmitFile(const String& path);     // /ir/*.ir (Flipper format)
+
+    // Multi-signal .ir files (Flipper format with several "name:" blocks).
+    // Signals are parsed skipping '#' comment lines; raw and parsed
+    // (protocol/address/command) both supported.
+    struct IrSignal {
+        char     name[32];
+        uint32_t freq;          // carrier Hz (raw only)
+        bool     parsed;        // true = protocol/address/command record
+        char     proto[16];
+        uint32_t address;
+        uint32_t command;
+        uint16_t raw[500];      // raw timings, us
+        int      rawLen;
+    };
+    int loadSignals(const String& path, IrSignal* out, int max); // count loaded
+    bool sendSignal(const IrSignal& sig);
 }

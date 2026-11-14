@@ -115,57 +115,84 @@ bool sendRaw(uint32_t hz, const uint16_t* timingsUs, int len) {
 }
 
 bool transmitFile(const String& path) {
-    File f = SD.exists(path) ? SD.open(path) : LittleFS.open(path);
-    if (!f) return false;
+    // legacy single-signal path: parse and send the LAST raw/parsed record
+    IrSignal sigs[2];
+    int n = loadSignals(path, sigs, 2);
+    if (n <= 0) return false;
+    return sendSignal(sigs[n - 1]);
+}
 
-    String type = "", proto = "", addrStr = "", cmdStr = "", dataStr = "";
-    uint32_t freq = 38000;
-    while (f.available()) {
+int loadSignals(const String& path, IrSignal* out, int max) {
+    File f = SD.exists(path) ? SD.open(path) : LittleFS.open(path);
+    if (!f) return 0;
+    int count = 0;
+    bool haveCurrent = false;
+    while (f.available() && count < max) {
         String line = f.readStringUntil('\n');
         line.trim();
+        if (line.length() == 0 || line[0] == '#') continue; // comments
         int colon = line.indexOf(':');
         if (colon <= 0) continue;
         String key = line.substring(0, colon);
         key.trim();
         String val = line.substring(colon + 1);
         val.trim();
-        if (key == "type") type = val;
-        else if (key == "protocol") proto = val;
-        else if (key == "address") addrStr = val;
-        else if (key == "command") cmdStr = val;
-        else if (key == "frequency") freq = (uint32_t)val.toFloat();
-        else if (key == "data") dataStr = val;
+
+        if (key == "name") {
+            // start a new signal
+            if (haveCurrent && count < max) count++;
+            haveCurrent = count < max;
+            if (haveCurrent) {
+                IrSignal& s = out[count];
+                memset(&s, 0, sizeof(IrSignal));
+                strncpy(s.name, val.c_str(), sizeof(s.name) - 1);
+                s.freq = 38000;
+                s.parsed = false;
+            }
+            continue;
+        }
+        if (!haveCurrent && count < max) {
+            // tolerate a file starting without a name line
+            if (count < max) {
+                memset(&out[0], 0, sizeof(IrSignal));
+                strncpy(out[0].name, "signal", 6);
+                out[0].freq = 38000;
+                haveCurrent = true;
+            }
+        }
+        IrSignal& s = out[count];
+        if (key == "type") s.parsed = (val == "parsed");
+        else if (key == "protocol") { strncpy(s.proto, val.c_str(), sizeof(s.proto) - 1); s.parsed = true; }
+        else if (key == "address") s.address = parseHexBytes(val);
+        else if (key == "command") s.command = parseHexBytes(val);
+        else if (key == "frequency") s.freq = (uint32_t)val.toFloat();
+        else if (key == "data") {
+            size_t start = 0;
+            while (start < val.length() && s.rawLen < 500) {
+                while (start < val.length() && val[start] == ' ') start++;
+                if (start >= val.length()) break;
+                int end = val.indexOf(' ', start);
+                if (end < 0) end = val.length();
+                long v = val.substring(start, end).toInt();
+                start = end + 1;
+                if (v < 0) v = -v;
+                if (v == 0) continue;
+                if (v > 65000) v = 65000;
+                s.raw[s.rawLen++] = (uint16_t)v;
+            }
+        }
     }
     f.close();
+    if (haveCurrent && count < max) count++;
+    return count;
+}
 
-    if (type == "parsed") {
-        if (proto == "PANASONIC") {
-            // address: 2 bytes, command: 4 bytes
-            uint32_t addr = parseHexBytes(addrStr) & 0xFFFF;
-            uint32_t cmd = parseHexBytes(cmdStr);
-            return sendParsed(proto, addr, cmd);
-        }
-        return sendParsed(proto, parseHexBytes(addrStr), parseHexBytes(cmdStr));
+bool sendSignal(const IrSignal& sig) {
+    if (sig.parsed) {
+        return sendParsed(String(sig.proto), sig.address, sig.command);
     }
-    if (type == "raw") {
-        uint16_t t[400];
-        int n = 0;
-        int start = 0;
-        while (start < (int)dataStr.length() && n < 400) {
-            while (start < (int)dataStr.length() && dataStr[start] == ' ') start++;
-            if (start >= (int)dataStr.length()) break;
-            int end = dataStr.indexOf(' ', start);
-            if (end < 0) end = dataStr.length();
-            long v = dataStr.substring(start, end).toInt();
-            start = end + 1;
-            if (v < 0) v = -v;
-            if (v == 0) continue;
-            if (v > 65000) v = 65000;
-            t[n++] = (uint16_t)v;
-        }
-        return sendRaw(freq, t, n);
-    }
-    return false;
+    if (sig.rawLen <= 0) return false;
+    return sendRaw(sig.freq, sig.raw, sig.rawLen);
 }
 
 } // namespace Ir
