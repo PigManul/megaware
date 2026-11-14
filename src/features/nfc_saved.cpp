@@ -31,11 +31,100 @@ namespace {
     bool statusOk = false;
 
     int menuSel = 0;
-    const char* const MENU[4] = {"Write to card", "Export .nfc", "Export .mfd", "Key map"};
+    const char* const MENU[5] = {"Write to card", "Export .nfc", "Export .mfd", "Key map", "Emulate UID"};
+
+    // UID/SAK for the Emulate-UID action (from .nfc metadata or raw dump)
+    uint8_t emuUid[10] = {0};
+    uint8_t emuUidLen = 0;
+    uint8_t emuSak = 0x00;
+    bool emulating = false;
+    uint32_t emuHits = 0;
+    char devType[24] = "";
 
     int listSel = 0;
 
     fs::FS& dumpFs() { return Files::sdPresent() ? (fs::FS&)SD : (fs::FS&)LittleFS; }
+
+    // parse "UID: 04 39 91 ..." style hex lists into bytes, returns count
+    int parseHexList(const String& v, uint8_t* out, int cap) {
+        int n = 0;
+        size_t start = 0;
+        while (start < v.length() && n < cap) {
+            while (start < v.length() && v[start] == ' ') start++;
+            if (start >= v.length()) break;
+            int end = v.indexOf(' ', start);
+            if (end < 0) end = v.length();
+            if (end - start >= 2) {
+                char b[3] = {v[start], v[start + 1], 0};
+                if (isxdigit(b[0]) && isxdigit(b[1])) out[n++] = (uint8_t)strtol(b, nullptr, 16);
+            }
+            start = end + 1;
+        }
+        return n;
+    }
+
+    // Flipper .nfc (text) -> raw buffer: NTAG pages (4B) or Classic
+    // blocks (16B). Foreign files then run through the SAME editor /
+    // write-back machinery as our own dumps.
+    bool parseFlipperNfc(File& f) {
+        classicDump = false;
+        blocksTotal = 0;
+        uint32_t maxNtagPage = 0;
+        uint32_t maxClassicBlock = 0;
+        while (f.available()) {
+            String line = f.readStringUntil('\n');
+            line.trim();
+            if (line.length() == 0 || line[0] == '#') continue;
+            int colon = line.indexOf(':');
+            if (colon <= 0) continue;
+            String key = line.substring(0, colon);
+            key.trim();
+            String val = line.substring(colon + 1);
+            val.trim();
+
+            if (key == "Device type") {
+                strncpy(devType, val.c_str(), sizeof(devType) - 1);
+                devType[sizeof(devType) - 1] = 0;
+                classicDump = (val.indexOf("Classic") >= 0);
+            } else if (key == "UID") {
+                emuUidLen = (uint8_t)parseHexList(val, emuUid, 10);
+            } else if (key == "SAK") {
+                uint8_t s[1];
+                if (parseHexList(val, s, 1) == 1) emuSak = s[0];
+            } else if (key == "Block") {
+                if (!classicDump) continue;
+                int sp = val.indexOf(':');
+                if (sp < 0) continue;
+                long idx = val.substring(0, sp).toInt();
+                if (idx < 0 || idx >= 256) continue;
+                uint8_t b[16];
+                int n = parseHexList(val.substring(sp + 1), b, 16);
+                if (n != 16) continue;
+                memcpy(fileBuf + (uint32_t)idx * 16, b, 16);
+                if ((uint32_t)idx + 1 > maxClassicBlock) maxClassicBlock = idx + 1;
+            } else if (key == "Page") {
+                if (classicDump) continue;
+                int sp = val.indexOf(':');
+                if (sp < 0) continue;
+                long idx = val.substring(0, sp).toInt();
+                if (idx < 0 || idx >= 256) continue;
+                uint8_t b[4];
+                int n = parseHexList(val.substring(sp + 1), b, 4);
+                if (n != 4) continue;
+                memcpy(fileBuf + (uint32_t)idx * 4, b, 4);
+                if ((uint32_t)idx + 1 > maxNtagPage) maxNtagPage = idx + 1;
+            }
+        }
+        if (classicDump) {
+            blocksTotal = (uint16_t)maxClassicBlock;
+            fileBytes = (uint32_t)blocksTotal * 16;
+        } else {
+            blocksTotal = (uint16_t)maxNtagPage;
+            fileBytes = (uint32_t)blocksTotal * 4;
+        }
+        memset(blockDirty, 0, sizeof(blockDirty));
+        return fileBytes > 0;
+    }
 
     void setStatus(const char* m, bool ok) {
         snprintf(statusMsg, sizeof(statusMsg), "%s", m);
@@ -53,12 +142,36 @@ namespace {
         String path = String("/rfid/") + name;
         File f = dumpFs().open(path, FILE_READ);
         if (!f) { setStatus("open failed", false); return false; }
+        String lname = String(name); lname.toLowerCase();
+        if (lname.endsWith(".nfc")) {
+            // Flipper text format -> raw buffer (editor + write-back follow)
+            if (!parseFlipperNfc(f)) {
+                f.close();
+                setStatus("empty/broken .nfc", false);
+                return false;
+            }
+            f.close();
+            snprintf(openName, sizeof(openName), "%s", name);
+            viewOffset = 0;
+            editCursor = 0;
+            return true;
+        }
         fileBytes = f.size();
         if (fileBytes > sizeof(fileBuf)) fileBytes = sizeof(fileBuf);
         fileBytes = f.read(fileBuf, fileBytes);
         f.close();
         classicDump = (fileBytes == 1024 || fileBytes == 4096);
         blocksTotal = classicDump ? (uint16_t)(fileBytes / 16) : (uint16_t)(fileBytes / 4);
+        // raw dumps carry UID in the first bytes (Classic block 0 / pages 0-1)
+        if (classicDump) {
+            emuUidLen = 4;
+            memcpy(emuUid, fileBuf, 4);
+            emuSak = 0x08;
+        } else {
+            emuUidLen = fileBytes >= 7 ? 7 : (uint8_t)fileBytes;
+            memcpy(emuUid, fileBuf, emuUidLen);
+            emuSak = 0x00;
+        }
         memset(blockDirty, 0, sizeof(blockDirty));
         snprintf(openName, sizeof(openName), "%s", name);
         viewOffset = 0;
@@ -75,7 +188,7 @@ namespace {
         f.println("Filetype: Flipper NFC device");
         f.println("Version: 4");
         f.println("# Device type can be ISO14443-3A, ISO14443-4A, ISO14443-3B, ISO14443-4B");
-        f.println("Device type: ISO14443-3A");
+        f.println(classicDump ? "Device type: Mifare Classic" : "Device type: ISO14443-3A");
         f.println("# UID is common for all formats");
         f.print("UID:");
         for (int i = 0; i < 4 && i < 16; i++) f.printf(" %02X", fileBuf[i]);
@@ -87,7 +200,8 @@ namespace {
         f.printf("Pages read: %u\n", blocksTotal);
         f.println("Failed authentication attempts: 0");
         for (uint16_t b = 0; b < blocksTotal; b++) {
-            f.printf("Block %u:", b);
+            if (classicDump) f.printf("Block %u:", b);
+            else f.printf("Page %u:", b);
             for (int i = 0; i < 16 && (uint32_t)b * 16 + i < fileBytes; i++) f.printf(" %02X", fileBuf[b * 16 + i]);
             f.println();
         }
@@ -206,7 +320,7 @@ namespace {
         c.setFont(&fonts::Font0);
         c.setTextSize(Theme::SIZE_TEXT);
         c.setTextDatum(textdatum_t::middle_left);
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < 5; i++) {
             int y = y0 + 20 + i * Theme::ROW_LIST + Theme::ROW_LIST / 2;
             bool s = (i == menuSel);
             if (s) { c.setTextColor(Theme::ACCENT, Theme::BG); c.drawString(">", x0, y); }
@@ -326,7 +440,7 @@ namespace {
 
         if (state == Menu) {
             if (in.rotationSteps != 0) {
-                menuSel = ((menuSel + in.rotationSteps) % 4 + 4) % 4;
+                menuSel = ((menuSel + in.rotationSteps) % 5 + 5) % 5;
                 Features::requestRedraw();
                 return true;
             }
@@ -334,7 +448,15 @@ namespace {
                 if (menuSel == 0) writeBackToCard();
                 else if (menuSel == 1) exportNfc();
                 else if (menuSel == 2) exportMfd();
-                else state = KeyMap;
+                else if (menuSel == 3) state = KeyMap;
+                else {
+                    // Emulate UID (from .nfc metadata or the raw dump head)
+                    if (emuUidLen > 0 && Nfc::emulateStart(emuUid, emuUidLen, emuSak)) {
+                        emulating = true;
+                        emuHits = 0;
+                        state = KeyMap; // reuse a quiet screen while emulating
+                    } else setStatus("emulate start failed", false);
+                }
                 Features::requestRedraw();
                 return true;
             }
@@ -347,6 +469,18 @@ namespace {
         }
 
         if (state == KeyMap) {
+            if (emulating) {
+                // UID emulation loop (silently serving the reader)
+                uint8_t data[64];
+                uint8_t dataLen = sizeof(data);
+                if (Nfc::emulatePoll(data, &dataLen, 30)) emuHits++;
+                Features::requestRedraw();
+                if (in.event == InputEvent::Click || in.event == InputEvent::UserKey) {
+                    Nfc::emulateStop();
+                    emulating = false;
+                }
+                return true;
+            }
             if (in.event == InputEvent::Click || in.event == InputEvent::UserKey) {
                 state = Menu;
                 Features::requestRedraw();
@@ -356,10 +490,17 @@ namespace {
         return false;
     }
 
-    void tick() {}
+    void tick() {
+        if (state == KeyMap && emulating) {
+            uint8_t data[64];
+            uint8_t dataLen = sizeof(data);
+            if (Nfc::emulatePoll(data, &dataLen, 30)) emuHits++;
+        }
+    }
 
     void onExit() {
-        if (state == Edit) state = View; // правки остаются в буфере до выхода из фичи
+        if (emulating) { Nfc::emulateStop(); emulating = false; }
+        if (state == Edit) state = View;
     }
 }
 
