@@ -21,10 +21,30 @@ namespace {
         if (present && now - cacheAt < CACHE_MS) return;
         cacheAt = now;
         if (!present) { cachedPct = -1; cachedVoltage = 0.0f; cachedCharging = false; return; }
+
         cachedPct = gauge.readStateOfChargePercent();
-        if (cachedPct < 0 || cachedPct > 100) cachedPct = -1;
         cachedVoltage = gauge.readVoltageMillivolts() / 1000.0f;
-        cachedCharging = gauge.readCurrentMilliamps() > 0;
+
+        // charging from the gauge's own CHG flag (BatteryStatus bit 15),
+        // NOT from the current sign: the sign convention depends on the
+        // gauge configuration and used to show "charging" while idle
+        uint16_t st = 0;
+        cachedCharging = gauge.readBatteryStatus(st) ? ((st & 0x8000) != 0) : false;
+
+        // sanity gates: an unconfigured fuel gauge reports nonsense
+        bool voltSane = cachedVoltage >= 2.5f && cachedVoltage <= 4.6f;
+        if (cachedPct < 0 || cachedPct > 100) cachedPct = -1;
+        if (!voltSane) { cachedPct = -1; cachedCharging = false; cachedVoltage = 0.0f; }
+
+        // fallback: SOC plainly wrong while voltage is sane - estimate
+        // from the LiPo curve so the topbar is never garbage
+        float vPct = 0.0f;
+        if (voltSane) {
+            vPct = (cachedVoltage - 3.30f) / (4.20f - 3.30f) * 100.0f;
+            vPct = vPct < 0 ? 0 : (vPct > 100 ? 100 : vPct);
+            if (cachedPct < 0) cachedPct = (int)vPct;
+            else if (!cachedCharging && cachedPct < (int)vPct / 2) cachedPct = (int)vPct;
+        }
     }
 }
 

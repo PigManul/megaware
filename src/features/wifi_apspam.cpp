@@ -63,8 +63,7 @@ namespace {
     // worst case 36 + 2 + 32 (SSID) + 10 (rates) + 3 (DS) = 83 — 96 gives headroom
     // returns the esp_wifi error code (ESP_OK on success)
     esp_err_t sendBeacon(const char* ssid, uint8_t ch) {
-        uint8_t pkt[96];
-        memset(pkt, 0, sizeof(pkt));
+        uint8_t pkt[96];        memset(pkt, 0, sizeof(pkt));
         pkt[0] = 0x80; pkt[1] = 0x00;                 // beacon, no flags
         memset(pkt + 4, 0xFF, 6);                     // DA: broadcast
         for (int i = 0; i < 6; i++) {                 // SA/BSS: случайный MAC (local, unicast)
@@ -85,7 +84,10 @@ namespace {
         pkt[p++] = 0x82; pkt[p++] = 0x84; pkt[p++] = 0x8B; pkt[p++] = 0x96;
         pkt[p++] = 0x24; pkt[p++] = 0x30; pkt[p++] = 0x48; pkt[p++] = 0x6C;
         pkt[p++] = 0x03; pkt[p++] = 0x01; pkt[p++] = ch; // DS param: channel
-        return esp_wifi_80211_tx(WIFI_IF_AP, pkt, p, false);
+        // Maruder-style: the STA interface carries raw injection - the
+        // AP interface pins the radio to its own channel and
+        // esp_wifi_set_channel fails while it is up
+        return esp_wifi_80211_tx(WIFI_IF_STA, pkt, p, false);
     }
 
     void draw(LGFX_Sprite& c, int x0, int y0, int w, int h) {
@@ -132,9 +134,22 @@ namespace {
                     Features::requestRedraw();
                     return true; // нечего спамить
                 }
-                // RAW-инжекция требует запущенного Wi-Fi (AP-интерфейс)
-                if (!WifiMgr::isAPRunning() && !WifiMgr::isConnected()) WifiMgr::startAP(0);
+                // channel hopping needs a FREE radio: a running AP pins
+                // the channel (set_channel failed on it before), and a
+                // connected STA would drop the link on every hop
+                if (WifiMgr::isConnected() || WifiMgr::isAPRunning()) {
+                    snprintf(errMsg, sizeof(errMsg), "disconnect Wi-Fi first");
+                    Features::requestRedraw();
+                    return true;
+                }
+                errMsg[0] = 0;
+                // STA mode, not connected, promiscuous - the Maruder
+                // recipe: only in this state does set_channel succeed
+                WiFi.mode(WIFI_STA);
+                WiFi.disconnect();
+                delay(50);
                 esp_wifi_set_promiscuous(true);
+                spamCh = 1;
                 spamming = true;
                 sent = 0;
             }
