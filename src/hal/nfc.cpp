@@ -10,7 +10,13 @@ namespace {
     // the driver polls the RDY byte over the bus (see isready() in
     // Adafruit_PN532.cpp); the pins are only used in GPIO modes.
     // -1 -> 255: begin() guards _reset itself, pinMode(255) is a core no-op.
-    Adafruit_PN532 pn532(/*irq*/ -1, /*reset*/ -1, &Wire);
+    Adafruit_PN532 pn532I2c(/*irq*/ -1, /*reset*/ -1, &Wire);
+    // External PN532 on the Grove port over HSU (UART1 115200, TX=43 RX=44).
+    // RST line reuse: GPIO45 pulses the INTERNAL chip too - harmless, the
+    // internal transport re-inits on its next ensure().
+    Adafruit_PN532 pn532Uart(/*reset*/ PIN_PN532_RST, &Serial1);
+    Adafruit_PN532* pn532 = &pn532I2c;
+    bool uartMode = false;
 
     bool inited = false;
     bool ready = false;
@@ -60,6 +66,7 @@ namespace {
 namespace Nfc {
 
 bool busPresent() {
+    if (uartMode) return true; // no I2C probe for the UART transport
     Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
     Wire.beginTransmission(PN532_I2C_ADDRESS); // 0x24 (7-bit), library default
     return Wire.endTransmission() == 0;
@@ -68,33 +75,50 @@ bool busPresent() {
 bool ensure() {
     if (inited) return ready;
     inited = true;
-    // Explicitly set our I2C pins: Adafruit_I2CDevice::begin() inside
-    // pn532.begin() calls Wire.begin() without arguments, and the core
-    // keeps them when the bus is already running — but play it safe.
-    Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
+    if (!uartMode) {
+        // Explicitly set our I2C pins: Adafruit_I2CDevice::begin() inside
+        // pn532.begin() calls Wire.begin() without arguments, and the core
+        // keeps them when the bus is already running — but play it safe.
+        Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
 
-    // IMPORTANT: RST pulse (GPIO45) BEFORE checking the bus. If the chip
-    // is held in reset (RST float/low), it does not ACK — the previous
-    // "busPresent -> decide" order discarded a live module before wakeup.
-    pinMode(PIN_PN532_RST, OUTPUT);
-    digitalWrite(PIN_PN532_RST, LOW);
-    delay(50);
-    digitalWrite(PIN_PN532_RST, HIGH);
-    delay(20);
-    pinMode(PIN_PN532_IRQ, INPUT);
+        // IMPORTANT: RST pulse (GPIO45) BEFORE checking the bus. If the chip
+        // is held in reset (RST float/low), it does not ACK — the previous
+        // "busPresent -> decide" order discarded a live module before wakeup.
+        pinMode(PIN_PN532_RST, OUTPUT);
+        digitalWrite(PIN_PN532_RST, LOW);
+        delay(50);
+        digitalWrite(PIN_PN532_RST, HIGH);
+        delay(20);
+        pinMode(PIN_PN532_IRQ, INPUT);
+    } else {
+        // Grove HSU: TX=43 RX=44, 115200 8N1 - the PN532 factory transport
+        Serial1.begin(115200, SERIAL_8N1, /*rx*/ 44, /*tx*/ 43);
+        delay(20);
+    }
 
-    pn532.begin();
+    pn532->begin();
 
     // the chip may still be waking up after reset — up to 5 attempts
     uint32_t ver = 0;
     for (int attempt = 0; attempt < 5 && !ver; attempt++) {
-        ver = pn532.getFirmwareVersion();
+        ver = pn532->getFirmwareVersion();
         if (!ver) delay(100);
     }
     if (!ver) { ready = false; return false; }
-    ready = pn532.SAMConfig();
+    ready = pn532->SAMConfig();
     return ready;
 }
+
+bool useUart(bool on) {
+    if (on == uartMode) return true;
+    uartMode = on;
+    pn532 = on ? &pn532Uart : &pn532I2c;
+    inited = false; // force re-ensure on the new transport
+    ready = false;
+    return ensure();
+}
+
+bool uartActive() { return uartMode; }
 
 bool isReady() { return inited && ready; }
 
@@ -104,7 +128,7 @@ bool readTag(Tag& out) {
     uint8_t uid[10];
     uint8_t uidLen = 0;
     // Short timeout: the feature polls the field from tick(), must not hang
-    if (!pn532.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLen, 60)) return false;
+    if (!pn532->readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLen, 60)) return false;
     if (uidLen == 0 || uidLen > 10) return false;
 
     memset(&out, 0, sizeof(out));
@@ -118,9 +142,9 @@ bool readTag(Tag& out) {
 
     if (uidLen == 4) {
         const uint8_t* k = KEYS[0];
-        bool classic1k = pn532.mifareclassic_AuthenticateBlock(uid, uidLen, 4, 0, (uint8_t*)k) == 1;
+        bool classic1k = pn532->mifareclassic_AuthenticateBlock(uid, uidLen, 4, 0, (uint8_t*)k) == 1;
         if (classic1k) {
-            bool classic4k = pn532.mifareclassic_AuthenticateBlock(uid, uidLen, 128, 0, (uint8_t*)k) == 1;
+            bool classic4k = pn532->mifareclassic_AuthenticateBlock(uid, uidLen, 128, 0, (uint8_t*)k) == 1;
             out.isClassic = true;
             out.blocks = classic4k ? 256 : 64;
             snprintf(out.type, sizeof(out.type), "MIFARE Classic %s", classic4k ? "4K" : "1K");
@@ -130,7 +154,7 @@ bool readTag(Tag& out) {
     } else if (uidLen == 7) {
         // NTAG/Ultralight are told apart by the Capability Container (page 3)
         uint8_t page[4];
-        if (pn532.ntag2xx_ReadPage(3, page) == 1 && page[0] == 0xE1) {
+        if (pn532->ntag2xx_ReadPage(3, page) == 1 && page[0] == 0xE1) {
             out.isNtag = true;
             switch (page[2]) {
                 case 0x12: out.pages = 45;  snprintf(out.type, sizeof(out.type), "NTAG213"); break;
@@ -161,7 +185,7 @@ bool classicReadBlock(uint8_t block, uint8_t* data) {
         bool ok = false;
         // 1) built-in default/transport keys
         for (uint8_t ki = 0; ki < KEY_COUNT && !ok; ki++) {
-            if (pn532.mifareclassic_AuthenticateBlock(lastUid, lastUidLen, block, 0, (uint8_t*)KEYS[ki]) == 1) {
+            if (pn532->mifareclassic_AuthenticateBlock(lastUid, lastUidLen, block, 0, (uint8_t*)KEYS[ki]) == 1) {
                 authedSector = sector;
                 authedKeyIdx = ki;
                 memcpy(lastKeyBytes, KEYS[ki], 6);
@@ -171,7 +195,7 @@ bool classicReadBlock(uint8_t block, uint8_t* data) {
         }
         // 2) user dictionary (/rfid/keys.txt)
         for (int ki = 0; ki < extraKeyCount && !ok; ki++) {
-            if (pn532.mifareclassic_AuthenticateBlock(lastUid, lastUidLen, block, 0, extraKeys[ki]) == 1) {
+            if (pn532->mifareclassic_AuthenticateBlock(lastUid, lastUidLen, block, 0, extraKeys[ki]) == 1) {
                 authedSector = sector;
                 memcpy(lastKeyBytes, extraKeys[ki], 6);
                 lastKeyValid = true;
@@ -180,7 +204,7 @@ bool classicReadBlock(uint8_t block, uint8_t* data) {
         }
         if (!ok) return false;
     }
-    return pn532.mifareclassic_ReadDataBlock(block, data) == 1;
+    return pn532->mifareclassic_ReadDataBlock(block, data) == 1;
 }
 
 bool lastAuthKey(uint8_t keyOut[6]) {
@@ -193,7 +217,7 @@ bool classicTryKey(uint8_t block, const uint8_t key[6], bool keyA) {
     if (!ready || !lastIsClassic || lastUidLen == 0) return false;
     // 0 = KEY A, 1 = KEY B (Adafruit-PN532 convention)
     invalidateAuth(); // the sector key cache is no longer trustworthy
-    return pn532.mifareclassic_AuthenticateBlock(lastUid, lastUidLen, block,
+    return pn532->mifareclassic_AuthenticateBlock(lastUid, lastUidLen, block,
                                                  keyA ? 0 : 1, (uint8_t*)key) == 1;
 }
 
@@ -204,7 +228,7 @@ bool classicWriteBlock(uint8_t block, const uint8_t* data) {
         // authenticate with the same key trial loop (write = read via key A)
         bool ok = false;
         for (uint8_t ki = 0; ki < KEY_COUNT && !ok; ki++) {
-            if (pn532.mifareclassic_AuthenticateBlock(lastUid, lastUidLen, block, 0, (uint8_t*)KEYS[ki]) == 1) {
+            if (pn532->mifareclassic_AuthenticateBlock(lastUid, lastUidLen, block, 0, (uint8_t*)KEYS[ki]) == 1) {
                 authedSector = sector;
                 memcpy(lastKeyBytes, KEYS[ki], 6);
                 lastKeyValid = true;
@@ -212,7 +236,7 @@ bool classicWriteBlock(uint8_t block, const uint8_t* data) {
             }
         }
         for (int ki = 0; ki < extraKeyCount && !ok; ki++) {
-            if (pn532.mifareclassic_AuthenticateBlock(lastUid, lastUidLen, block, 0, extraKeys[ki]) == 1) {
+            if (pn532->mifareclassic_AuthenticateBlock(lastUid, lastUidLen, block, 0, extraKeys[ki]) == 1) {
                 authedSector = sector;
                 memcpy(lastKeyBytes, extraKeys[ki], 6);
                 lastKeyValid = true;
@@ -223,7 +247,7 @@ bool classicWriteBlock(uint8_t block, const uint8_t* data) {
     }
     uint8_t buf[16];
     memcpy(buf, data, 16);
-    return pn532.mifareclassic_WriteDataBlock(block, buf) == 1;
+    return pn532->mifareclassic_WriteDataBlock(block, buf) == 1;
 }
 
 bool apdu(const uint8_t* in, int inLen, uint8_t* out, int* outLen) {
@@ -233,7 +257,7 @@ bool apdu(const uint8_t* in, int inLen, uint8_t* out, int* outLen) {
     uint8_t buf[64];
     if (inLen <= 0 || inLen > 64) return false;
     memcpy(buf, in, inLen);
-    if (!pn532.inDataExchange(buf, (uint8_t)inLen, resp, &respLen)) return false;
+    if (!pn532->inDataExchange(buf, (uint8_t)inLen, resp, &respLen)) return false;
     int n = respLen > *outLen ? *outLen : respLen;
     memcpy(out, resp, n);
     *outLen = n;
@@ -246,7 +270,7 @@ bool rats(uint8_t* ats, int* atsLen) {
     uint8_t ratsCmd[2] = {0xE0, 0x50};
     uint8_t resp[64];
     uint8_t respLen = 0;
-    if (!pn532.inDataExchange(ratsCmd, 2, resp, &respLen)) return false;
+    if (!pn532->inDataExchange(ratsCmd, 2, resp, &respLen)) return false;
     if (respLen < 2 || resp[0] < 1) return false; // ATS TLV
     int n = respLen > 1 ? respLen - 1 : 0;        // without the TL byte
     if (n > *atsLen) n = *atsLen;
@@ -291,7 +315,7 @@ bool emulateStart(const uint8_t* uid, uint8_t uidLen, uint8_t sak) {
     tgCmd[0] = 0x8C;
     memcpy(tgCmd + 1, cmd + 1, 36);
 
-    if (!pn532.sendCommandCheckAck(tgCmd, 37, 1000)) return false;
+    if (!pn532->sendCommandCheckAck(tgCmd, 37, 1000)) return false;
 
     // PN532 is now in target mode, waiting for the reader field
     return true;
@@ -299,7 +323,7 @@ bool emulateStart(const uint8_t* uid, uint8_t uidLen, uint8_t sak) {
 
 bool emulateStop() {
     // Exiting target mode: FACTORYRESET or simply SAMConfig again
-    pn532.SAMConfig();
+    pn532->SAMConfig();
     return true;
 }
 
@@ -308,7 +332,7 @@ bool emulatePoll(uint8_t* data, uint8_t* dataLen, uint32_t timeoutMs) {
     // In the Adafruit lib this is getDataTarget(uint8_t* cmd, uint8_t* cmdlen)
     uint8_t tmp[64];
     uint8_t tmpLen = 0;
-    if (!pn532.getDataTarget(tmp, &tmpLen)) return false;
+    if (!pn532->getDataTarget(tmp, &tmpLen)) return false;
     if (tmpLen == 0) return false;
     int n = tmpLen > *dataLen ? *dataLen : tmpLen;
     memcpy(data, tmp, n);
@@ -317,21 +341,21 @@ bool emulatePoll(uint8_t* data, uint8_t* dataLen, uint32_t timeoutMs) {
 }
 
 bool emulateRespond(const uint8_t* data, uint8_t len) {
-    return pn532.setDataTarget(const_cast<uint8_t*>(data), len);
+    return pn532->setDataTarget(const_cast<uint8_t*>(data), len);
 }
 
 bool ntagReadPage(uint16_t page, uint8_t* data) {
     if (!ready || !lastIsNtag) return false;
     // NTAG21x pages > 255 are read with the regular 4-byte page read command
-    return pn532.mifareultralight_ReadPage((uint8_t)page, data) == 1 ||
-           pn532.ntag2xx_ReadPage((uint8_t)page, data) == 1;
+    return pn532->mifareultralight_ReadPage((uint8_t)page, data) == 1 ||
+           pn532->ntag2xx_ReadPage((uint8_t)page, data) == 1;
 }
 
 bool ntagWritePage(uint16_t page, const uint8_t* data) {
     if (!ready || !lastIsNtag) return false;
     uint8_t buf[4];
     memcpy(buf, data, 4);
-    return pn532.ntag2xx_WritePage((uint8_t)page, buf) == 1;
+    return pn532->ntag2xx_WritePage((uint8_t)page, buf) == 1;
 }
 
 void loadKeyDictionary() {

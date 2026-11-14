@@ -15,4 +15,9 @@ namespace WebUI {
     void stop();
     bool isRunning();
     void loop();
+
+    // Shared terminal-command engine: runs one command (the same set as
+    // the WebUI terminal) and returns the text output. Used by the
+    // Telnet server and any future remote-control transport.
+    bool execCommand(const String& cmd, String& out);
 }

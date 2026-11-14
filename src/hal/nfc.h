@@ -32,6 +32,12 @@ namespace Nfc {
     // distinguishes "no module" from "module present but not responding".
     bool busPresent();
 
+    // Transport switch: internal I2C module vs external PN532 on Grove
+    // HSU (UART1 115200, TX=43 RX=44). All reader/dump/write features
+    // transparently use the active transport. Re-inits the PN532.
+    bool useUart(bool on);
+    bool uartActive();
+
     // Polls the field: returns true and fills out if a card is in the field.
     bool readTag(Tag& out);
 

@@ -799,16 +799,12 @@ namespace {
         server->send(200, "application/json", j);
     }
 
-    void handleApiCmd() {
-        String cmd = server->arg("cmd");
-        String out = "";
-        bool ok = true;
+    // The command chain, shared by /api/cmd and the Telnet server
+    // (WebUI::execCommand). 'ok' is the success flag.
+    bool cmdExecImpl(const String& cmd, String& out, bool& ok) {
+        ok = true;
         if (cmd == "reboot") {
-            out = "rebooting";
-            server->send(200, "application/json", "{\"ok\":true,\"out\":\"rebooting\"}");
-            delay(400);
-            ESP.restart();
-            return;
+            out = "rebooting"; // caller sends the reply and restarts itself
         } else if (cmd.startsWith("led ")) {
             int r = 0, g = 0, b = 0;
             if (sscanf(cmd.c_str() + 4, "%d %d %d", &r, &g, &b) == 3) {
@@ -899,6 +895,8 @@ namespace {
                 "bright <10..255>      display backlight\n"
                 "theme <0..3>          accent color preset\n"
                 "bridge [add|on|off|del]  TCP bridge port-forward rules\n"
+                "wg priv/peer/ep/port/ip/gw/ain/amask <v>\n"
+                "pn5ble <mac>          PN532 BLE bridge address\n"
                 "led <r> <g> <b>       encoder LED color (solid)\n"
                 "ledmode <0..4>        0 off 1 solid 2 breathing 3 tail 4 rainbow\n"
                 "spectrum on <0..3> | off   CC1101 sweep (graph above)\n"
@@ -1031,6 +1029,32 @@ namespace {
             int v = cmd.substring(7).toInt();
             if (v >= 10 && v <= 255) { ui.webSetBrightness((uint8_t)v); out = "brightness " + String(v); }
             else { ok = false; out = "usage: bright <10..255>"; }
+        } else if (cmd.startsWith("wg ")) {
+            // WireGuard configuration, stored in NVS: wg <field> <value>
+            String rest = cmd.substring(3);
+            rest.trim();
+            int wsp = rest.indexOf(' ');
+            String fld = wsp < 0 ? rest : rest.substring(0, wsp);
+            String val = wsp < 0 ? "" : rest.substring(wsp + 1);
+            val.trim();
+            static const char* F[8] = {"priv", "peer", "ep", "port", "ip", "gw", "ain", "amask"};
+            static const char* K[8] = {"wg_priv", "wg_peer", "wg_ep", "wg_port", "wg_ip", "wg_gw", "wg_ain", "wg_amask"};
+            bool found = false;
+            for (int i = 0; i < 8; i++) {
+                if (fld == F[i]) {
+                    if (!val.length()) { ok = false; out = String("usage: wg ") + F[i] + " <value>"; }
+                    else { Config::setString(K[i], val); out = String(F[i]) + " saved"; }
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) { ok = false; out = "fields: priv peer ep port ip gw ain amask"; }
+        } else if (cmd.startsWith("pn5ble ")) {
+            String mac = cmd.substring(7);
+            mac.trim();
+            mac.toUpperCase();
+            if (mac.length() == 17) { Config::setString("pn5ble_mac", mac); out = "pn532 ble mac saved: " + mac; }
+            else { ok = false; out = "usage: pn5ble AA:BB:CC:DD:EE:FF"; }
         } else if (cmd == "bridge" || cmd.startsWith("bridge ")) {
             // TCP bridge rules: slots 0..1, applied by the TCP Bridge feature
             BridgeRule rules[BridgeCfg::SLOTS];
@@ -1093,6 +1117,29 @@ namespace {
             ok = false;
             out = "unknown cmd - type 'help' (full docs: /docs)";
         }
+        return ok;
+    }
+} // namespace
+
+bool WebUI::execCommand(const String& cmd, String& out) {
+    bool ok = true;
+    cmdExecImpl(cmd, out, ok);
+    return ok;
+}
+
+namespace {
+
+    void handleApiCmd() {
+        String cmd = server->arg("cmd");
+        String out = "";
+        bool ok = true;
+        if (cmd == "reboot") {
+            server->send(200, "application/json", "{\"ok\":true,\"out\":\"rebooting\"}");
+            delay(400);
+            ESP.restart();
+            return;
+        }
+        ok = cmdExecImpl(cmd, out, ok);
         String j = String("{\"ok\":") + (ok ? "true" : "false") + ",\"out\":\"" + jsonEscape(out) + "\"}";
         server->sendHeader("Cache-Control", "no-store");
         server->send(200, "application/json", j);

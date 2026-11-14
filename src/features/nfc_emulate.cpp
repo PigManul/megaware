@@ -1,11 +1,12 @@
 // =====================================================================
-//  NFC: Emulate — устройство притворяется картой с UID из дампа.
-//  Выбор дампа из Saved → PN532 входит в target-режим → чужой ридер
-//  видит твой UID. Экран: статус эмуляции, счётчик обращений ридера.
-//
-//  Работает ТОЛЬКО на ридерах, проверяющих UID без CRYPTO1-auth
-//  (дешёвые домофоны, турникеты). MIFARE data-emulation невозможна:
-//  ISO14443-3A FDT ~86 мкс, а шина I2C + ESP32 медленнее.
+//  NFC: Emulate — устройство притворяется картой.
+//  Два режима:
+//   1) UID — притворяемся картой с UID из дампа (работает ТОЛЬКО на
+//      ридерах, проверяющих UID без CRYPTO1-auth; MIFARE data-emulation
+//      невозможна: ISO14443-3A FDT ~86 мкс, а шина I2C + ESP32 медленнее)
+//   2) NDEF — T4T-эмуляция: отвечаем на SELECT NDEF-приложения
+//      (AID D2760000850101), CC и READ BINARY — телефон видит NDEF-метку
+//      (экспериментально: зависит от лояльности ридера к таймингам)
 // =====================================================================
 #include "../ui/features.h"
 #include "../hal/nfc.h"
@@ -17,6 +18,7 @@
 namespace {
     enum State : uint8_t { Select, Emulating };
     State state = Select;
+    int emuMode = 0;            // 0 = UID dumps, 1 = NDEF files
     int selIndex = 0;
     char openName[64] = "";
 
@@ -34,6 +36,15 @@ namespace {
     char statusMsg[52] = "";
     uint32_t statusUntil = 0;
     bool statusOk = false;
+
+    // ---- T4T NDEF emulation state ----
+    bool emuNdef = false;
+    uint8_t ndefMsg[512];
+    uint16_t ndefLen_ = 0;
+    // selected file inside the emulated tag: 0 = none, 1 = CC, 2 = NDEF
+    uint8_t t4tFile = 0;
+    uint8_t t4tCc[15] = {0x00, 0x0F, 0x20, 0x00, 0x3B, 0x00, 0x34,
+                         0x04, 0x06, 0xE1, 0x04, 0x00, 0x00, 0x00, 0x00};
 
     fs::FS& emuFs() { return Files::sdPresent() ? (fs::FS&)SD : (fs::FS&)LittleFS; }
 
@@ -65,8 +76,71 @@ namespace {
     void startEmulate() {
         char path[96];
         char base[48]; baseName(base, sizeof(base));
-        snprintf(path, sizeof(path), "/rfid/%s.bin", base);
 
+        if (emuMode == 1) {
+            // ---- NDEF T4T: build the message from an /ndef file ----
+            snprintf(path, sizeof(path), "/ndef/%s", openName);
+            File f = emuFs().open(path, FILE_READ);
+            if (!f) { setStatus("ndef file not found", false); return; }
+            String line1 = f.readStringUntil('\n'); line1.trim();
+            String rest = f.readStringUntil(0);
+            f.close();
+            // same record semantics as the Write feature
+            String payload;
+            const char* kind = "URL";
+            if (line1.startsWith("URL:")) payload = line1.substring(4);
+            else if (line1.startsWith("TEXT:")) { kind = "TEXT"; payload = line1.substring(5); }
+            else if (line1.startsWith("VCARD:")) {
+                kind = "VCARD";
+                rest.trim();
+                payload = rest;
+            } else payload = line1;
+            if (payload.length() > 400) payload = payload.substring(0, 400);
+
+            size_t n = 0;
+            if (strcmp(kind, "URL") == 0) {
+                size_t pl = 1 + payload.length();
+                ndefMsg[n++] = 0xD1; ndefMsg[n++] = 0x01; ndefMsg[n++] = (uint8_t)pl;
+                ndefMsg[n++] = 0x55; ndefMsg[n++] = 0x00;
+            } else if (strcmp(kind, "TEXT") == 0) {
+                size_t pl = 3 + payload.length();
+                ndefMsg[n++] = 0xD1; ndefMsg[n++] = 0x01; ndefMsg[n++] = (uint8_t)pl;
+                ndefMsg[n++] = 0x54; ndefMsg[n++] = 0x02;
+                ndefMsg[n++] = 'e'; ndefMsg[n++] = 'n';
+            } else {
+                static const char* MT = "text/vcard";
+                size_t pl = strlen(MT) + payload.length();
+                ndefMsg[n++] = 0xD2; ndefMsg[n++] = 0x01; ndefMsg[n++] = (uint8_t)pl;
+                memcpy(ndefMsg + n, MT, strlen(MT)); n += strlen(MT);
+            }
+            memcpy(ndefMsg + n, payload.c_str(), payload.length());
+            n += payload.length();
+            ndefLen_ = (uint16_t)n;
+
+            // CC with the NDEF file size (NDEF len + 2 length bytes)
+            uint16_t fsz = ndefLen_ + 2;
+            t4tCc[11] = (uint8_t)(fsz >> 8);
+            t4tCc[12] = (uint8_t)(fsz & 0xFF);
+
+            // random UID, Type 4 SAK
+            for (int i = 0; i < 4; i++) emuUid[i] = esp_random() & 0xFF;
+            emuUidLen = 4;
+            emuSak = 0x20;
+            emuNdef = true;
+            t4tFile = 0;
+            if (!Nfc::emulateStart(emuUid, emuUidLen, emuSak)) {
+                setStatus("emulate start failed", false);
+                return;
+            }
+            emuHits = 0;
+            pollFailures = 0;
+            state = Emulating;
+            return;
+        }
+
+        // ---- UID mode: from a Classic dump ----
+        snprintf(path, sizeof(path), "/rfid/%s.bin", base);
+        emuNdef = false;
         File f = emuFs().open(path, FILE_READ);
         if (!f) { setStatus("dump not found", false); return; }
         uint8_t block0[16];
@@ -81,7 +155,6 @@ namespace {
             setStatus("emulate start failed", false);
             return;
         }
-        emuUidLen = emuUidLen; // уже установлен
         emuHits = 0;
         pollFailures = 0;
         state = Emulating;
@@ -93,29 +166,34 @@ namespace {
         c.setTextDatum(textdatum_t::top_left);
 
         if (state == Select) {
+            const char* dir = emuMode == 0 ? "/rfid" : "/ndef";
             FsRoot root = Files::sdPresent() ? FsRoot::SD : FsRoot::Flash;
-            int n = Files::listCount(root, "/rfid");
-            int visible = (h - 40) / Theme::ROW_LIST;
+            int n = Files::listCount(root, dir);
+            int visible = (h - 52) / Theme::ROW_LIST;
             int selC = n ? (selIndex % n + n) % n : 0;
             int top = selC - visible + 1;
             if (top < 0) top = 0;
             c.setTextDatum(textdatum_t::middle_left);
+            // mode header
+            c.setTextColor(Theme::ACCENT, Theme::BG);
+            c.drawString(emuMode == 0 ? "[UID]  NDEF" : " UID  [NDEF]", x0 + 10, y0 + 20);
             for (int i = 0; i < visible && top + i < n; i++) {
                 int idx = top + i;
-                FsEntry e = Files::listEntry(root, "/rfid", idx);
+                FsEntry e = Files::listEntry(root, dir, idx);
                 bool s = (idx == selC);
-                int yy = y0 + 20 + i * Theme::ROW_LIST + Theme::ROW_LIST / 2;
+                int yy = y0 + 34 + i * Theme::ROW_LIST + Theme::ROW_LIST / 2;
                 if (s) { c.setTextColor(Theme::ACCENT, Theme::BG); c.drawString(">", x0, yy); }
                 c.setTextColor(s ? Theme::TEXT : Theme::TEXT_DIM, Theme::BG);
                 c.drawString(e.name, x0 + 12, yy);
             }
             if (n == 0) {
                 c.setTextColor(Theme::TEXT_DIM, Theme::BG);
-                c.drawString("no dumps — use Dump first", x0 + 12, y0 + 20);
+                c.drawString(emuMode == 0 ? "no dumps — use Dump first" : "no ndef files — upload /ndef/*.txt",
+                             x0 + 12, y0 + 34);
             }
             c.setTextDatum(textdatum_t::top_left);
             c.setTextColor(Theme::TEXT_FAINT, Theme::BG);
-            c.drawString("click: emulate selected UID", x0 + 10, y0 + h - 14);
+            c.drawString("rot: switch list / select   click: emulate", x0 + 10, y0 + h - 14);
             return;
         }
 
@@ -125,7 +203,7 @@ namespace {
             c.drawString("READER DETECTED", x0 + 10, y0 + 26);
         } else {
             c.setTextColor(Theme::ACCENT, Theme::BG);
-            c.drawString("EMULATING...", x0 + 10, y0 + 26);
+            c.drawString(emuNdef ? "NDEF T4T EMULATING..." : "EMULATING...", x0 + 10, y0 + 26);
         }
 
         c.setFont(&fonts::Font0);
@@ -155,17 +233,30 @@ namespace {
         FsRoot root = Files::sdPresent() ? FsRoot::SD : FsRoot::Flash;
 
         if (state == Select) {
-            int n = Files::listCount(root, "/rfid");
-            if (in.rotationSteps != 0 && n > 0) {
-                selIndex = ((selIndex + in.rotationSteps) % n + n) % n;
+            const char* dir = emuMode == 0 ? "/rfid" : "/ndef";
+            FsRoot root = Files::sdPresent() ? FsRoot::SD : FsRoot::Flash;
+            int n = Files::listCount(root, dir);
+            if (in.rotationSteps != 0) {
+                if (n > 0) {
+                    selIndex = ((selIndex + in.rotationSteps) % n + n) % n;
+                } else {
+                    emuMode = (emuMode + 1) % 2; // empty list — rot flips mode
+                    selIndex = 0;
+                }
                 Features::requestRedraw();
                 return true;
             }
             if (in.event == InputEvent::Click && n > 0) {
                 int selC = (selIndex % n + n) % n;
-                FsEntry e = Files::listEntry(root, "/rfid", selC);
+                FsEntry e = Files::listEntry(root, dir, selC);
                 snprintf(openName, sizeof(openName), "%s", e.name);
                 startEmulate();
+                Features::requestRedraw();
+                return true;
+            }
+            if (in.event == InputEvent::LongPress && n > 0) {
+                emuMode = (emuMode + 1) % 2;
+                selIndex = 0;
                 Features::requestRedraw();
                 return true;
             }
@@ -194,6 +285,54 @@ namespace {
         if (Nfc::emulatePoll(data, &dataLen, 30)) {
             emuHits++;
             pollFailures = 0;
+
+            if (emuNdef && dataLen >= 5 && data[0] == 0x00) {
+                // ---- ISO14443-4 / T4T APDU handling ----
+                uint8_t resp[40];
+                size_t rl = 0;
+                bool handled = true;
+                if (data[1] == 0xA4 && data[2] == 0x04) {
+                    // SELECT by AID: our NDEF app D276 00 00 85 01 01?
+                    static const uint8_t NDEF_AID[7] = {0xD2, 0x76, 0x00, 0x00, 0x85, 0x01, 0x01};
+                    if (dataLen >= 15 && memcmp(data + 8, NDEF_AID, 7) == 0) {
+                        resp[rl++] = 0x90; resp[rl++] = 0x00;
+                    } else { resp[rl++] = 0x6A; resp[rl++] = 0x82; }
+                } else if (data[1] == 0xA4 && data[3] == 0x0C) {
+                    // SELECT by file id (E1 03 = CC, E1 04 = NDEF)
+                    if (dataLen >= 9 && data[7] == 0xE1) {
+                        t4tFile = data[8] == 0x03 ? 1 : (data[8] == 0x04 ? 2 : 0);
+                        resp[rl++] = 0x90; resp[rl++] = 0x00;
+                    } else { resp[rl++] = 0x6A; resp[rl++] = 0x82; }
+                } else if (data[1] == 0xB0 && dataLen >= 5) {
+                    // READ BINARY: offset p1p2, length Le
+                    uint16_t off = ((uint16_t)data[2] << 8) | data[3];
+                    uint8_t le = data[4];
+                    if (le == 0) le = 16;
+                    const uint8_t* src = nullptr;
+                    uint16_t srcLen = 0;
+                    if (t4tFile == 1) { src = t4tCc; srcLen = sizeof(t4tCc); }
+                    else if (t4tFile == 2) {
+                        // NDEF file = 2-byte length prefix + message
+                        uint8_t hdr[2] = {(uint8_t)(ndefLen_ >> 8), (uint8_t)(ndefLen_ & 0xFF)};
+                        // emulate a virtual file of hdr+message
+                        for (uint8_t i = 0; i < le && rl + 2 < sizeof(resp); i++) {
+                            uint16_t fp = off + i;
+                            uint8_t b = fp < 2 ? hdr[fp] : (fp - 2 < ndefLen_ ? ndefMsg[fp - 2] : 0);
+                            resp[rl++] = b;
+                        }
+                        resp[rl++] = 0x90; resp[rl++] = 0x00;
+                        Nfc::emulateRespond(resp, (uint8_t)rl);
+                        Features::requestRedraw();
+                        return;
+                    } else { resp[rl++] = 0x6A; resp[rl++] = 0x82; }
+                    if (handled && t4tFile == 1) {
+                        for (uint8_t i = 0; i < le && off + i < srcLen && rl + 2 < sizeof(resp); i++)
+                            resp[rl++] = src[off + i];
+                        resp[rl++] = 0x90; resp[rl++] = 0x00;
+                    }
+                } else handled = false;
+                if (handled && rl) Nfc::emulateRespond(resp, (uint8_t)rl);
+            }
             Features::requestRedraw();
         } else {
             pollFailures++;
